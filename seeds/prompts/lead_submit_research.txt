@@ -1,0 +1,34 @@
+1. Research the specified company's signals using their definitions, priorities and missing-data rules (§2.1), following the research passes (§2.2).
+2. Verify company identity using its name and domain. Resolve or record evidence issues according to §4.1.
+3. Assess evidence reliability according to §2.3.
+4. Return all twelve signals exactly once. Mark unsupported observations missing with a gap. For supported evidence, provide exact sources and separate direct provenance from approximation.
+5. For company size, record in-scope inclusive employee bounds, reporting basis and observation date. Only a verified subset proves a lower bound for the evaluated population. Explain why a preferred observation is better supported and preserve alternatives. Do not label differing scopes as contradictory unless they cannot both be true.
+6. Tag independent directional growth observations by comparable observation period and a stable key. Use the same key for duplicate reports. Never invent a source, scope, period or estimate.
+
+Inputs: {{company_profile}}
+Output schema: {{research_schema}}
+
+
+TARGETED RESEARCH INSTRUCTIONS
+
+Follow the updated research allocation policy
+in Section 2.2.
+
+- Search for specific evidence supporting the
+  predefined signals, not general company information.
+- Group related signals into focused queries.
+- Prefer relevant excerpts and sufficient search
+  snippets over opening entire documents.
+- Collect one or two strong observations per signal
+  by default.
+- Avoid retrieving redundant or irrelevant content.
+- Keep evidence descriptions concise.
+- Search further only when additional information
+  could materially improve a business conclusion.
+- Stop searching once sufficient evidence is available.
+- Missing signals are valid outcomes.
+- Do not sacrifice provenance, reliability or minimum
+  evidence requirements for brevity.
+- Return only the required structured research output,
+  without additional narratives.
+

@@ -1,0 +1,100 @@
+body {
+  font-size: 13px;
+  background: #f3f6f4;
+}
+
+header strong { font-size: 18px; }
+header span, .bar small { font-size: 11px; }
+h2 { font-size: 14px; }
+.empty h1 { font-size: 23px; }
+.result h2, dialog h2 { font-size: 19px; }
+.bubble { font-size: 12px; }
+.right .company, .right .help, .right .note { font-size: 12px; }
+
+.layout {
+  --outer-gutter: clamp(14px, 3.5vw, 58px);
+  --chat-width: 54.545vw;
+  width: min(calc(100% - 2 * var(--outer-gutter)), calc(var(--chat-width) + 370px));
+  height: calc(100dvh - 88px);
+  grid-template-columns: minmax(0, min(var(--chat-width), calc(100% - 225px))) minmax(0, 1fr);
+  margin: 12px auto;
+  border: 1px solid #d9e3dc;
+  border-radius: 13px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.right {
+  padding: 20px clamp(14px, 2vw, 24px);
+  gap: 12px;
+}
+
+.right > #lead,
+.right > #customer,
+.right .companies {
+  width: 100%;
+  max-width: 255px;
+  align-self: flex-start;
+}
+
+.right > #lead,
+.right > #customer {
+  text-align: left;
+  padding: 8px 10px;
+}
+
+.right .company { padding: 7px 0; }
+
+.composer { align-items: center; }
+.composer .send-button {
+  display: grid;
+  place-items: center;
+  align-self: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 23px;
+  line-height: 1;
+}
+.composer .send-button:hover:not(:disabled) { background: #204e3b; }
+
+.progress { padding: 11px 13px; font-size: 12px; }
+.progress-heading { margin: 0 0 6px; font-weight: 650; }
+.progress-steps { list-style: none; padding: 0; margin: 0; }
+.progress-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 21px;
+}
+.step-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  text-align: center;
+  line-height: 13px;
+  font-weight: 700;
+}
+.step-status { margin-left: auto; font-size: 10px; color: #60766a; }
+.progress-step--running .step-icon {
+  border: 2px solid #c7d9ce;
+  border-top-color: #286049;
+  border-radius: 50%;
+  animation: progress-spin .7s linear infinite;
+}
+.progress-step--done .step-icon { color: #286049; }
+.progress-step--failed .step-icon,
+.progress-step--failed .step-status { color: #a23b34; }
+.progress-record > .progress-steps { margin-top: 8px; }
+
+@keyframes progress-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .progress-step--running .step-icon { animation: none; }
+}
+
+@media (max-width: 680px) {
+  .layout { width: calc(100% - 20px); height: auto; margin: 10px auto; }
+  aside.right { border-left: 0; border-top: 1px solid #e2e9e4; }
+}

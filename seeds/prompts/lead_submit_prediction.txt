@@ -1,0 +1,8 @@
+1. Assess validated findings and their relevance to each prediction (§2, §3). Use no external research tools.
+2. Rate applicable travel signals and reference their exact supporting evidence indices (§3.1). Identify uncertainty that could change a rating. The backend computes scale, admitted coverage, weighted intensity and the matrix result. Do not produce your own travel level or weighted score.
+3. Assess Growth Potential (§3.2) and Expected Support Needs (§3.3).
+4. Determine confidence and minimum evidence eligibility for each prediction (§4.2–4.3).
+5. Return each prediction, confidence, supporting signals, rationale and key information gaps (§3.4, §4.3) using the supplied schema. Preserve traceability to the supplied evidence.
+
+Inputs: {{company_profile}}, {{validated_research_findings}}
+Output schema: {{prediction_schema}}

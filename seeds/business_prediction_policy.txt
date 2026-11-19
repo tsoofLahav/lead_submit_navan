@@ -1,0 +1,439 @@
+Business Prediction Policy
+Demo edition — revised evidence handling, validation and targeted research (19 November 2026)
+
+1. Business Context
+Available data
+
+Stage                              Available information
+
+Lead submit                        Customer-provided annual GBV estimate, enriched company size when available
+
+Company research                   Public company information
+
+Post-signup                        Manually entered customer activity summary and qualitative trends since signup
+
+For lead submissions, the customer-provided GBV is required but may underestimate or overestimate actual potential.
+
+Existing Tier Assignment
+
+Tier              Eligibility                                                  Support model
+
+Tier 1            GBV ≥ $500K                                                  Dedicated AE and AM
+
+Tier 2            GBV ≥ $100K or 150+ employees, unless Tier 1 applies         AE-led adoption and launch
+
+Tier 3            All other companies                                          Primarily product-led
+
+1.1. System Responsibility
+Flexible on information, strict on decisions and actions. AI interprets evidence, relevance, credibility, uncertainty and business implications. The backend owns deterministic calculations, classifications, eligibility and action constraints. Intermediate uncertainty limits dependent conclusions rather than invalidating the entire evaluation. Validation becomes stricter toward actionable recommendations and actual tier changes. System-recommended tier changes require explicit human approval.
+
+2. Research Signals & Evidence
+2.1. Research Signals
+
+Signal                           Measurement                            Priority        Missing data handling
+
+Company size                     Employee count or range                High            Estimate from alternative sources
+
+Sales & account                  Team size, geographic coverage         High            Estimate activity from business
+management                                                                              model
+
+Customer-facing                  On-site services and client visits     High            Infer from company services
+operations
+
+Internal collaboration           Distributed teams, office visits,      High            Infer from organizational structure
+company gatherings
+
+International presence           Number of countries and operational    Medium          Unknown
+offices
+
+Conferences & events             Participation and frequency            Medium          Unknown
+
+Business growth                  Revenue or headcount growth rate       Medium          Market expansion as indirect
+evidence
+
+Operational complexity           Locations, entities, organizational    Medium          Partial assessment from available
+structure                                              indicators
+
+Market expansion                 New markets and office openings        Medium          Unknown
+
+Hiring activity                  Change in open positions               Low             Unknown
+
+Funding                          Funding amount and date                Low             Unknown
+
+Signal                           Measurement                                Priority         Missing data handling
+
+Industry & work model            Sector, remote/hybrid/on-site              Contextual       Unknown
+
+Unsupported alternative estimates are classified as unknown.
+
+2.2. Research Allocation and Targeted Evidence Collection
+
+The objective is to collect the smallest useful set of evidence for the defined signals in Section 2.1, not to build a comprehensive company profile. Research is bounded by the allocated execution budget.
+
+Pass 1 — Targeted retrieval: Verify company identity and search for specific facts that support high-priority signals. Group related signals into focused queries when useful. Prefer concise authoritative sources and relevant passages over general company profiles or entire reports. Use search snippets when they provide sufficient attributable evidence; open a source only when necessary to establish the claim, scope, reliability or material uncertainty.
+
+Pass 2 — Selective completion: Search for missing or disputed evidence only when it could materially affect a prediction, eligibility or a useful business follow-up. Prioritize the minimum evidence requirements in Section 4.3. Reuse relevant findings across signals rather than retrieving the same information again. Do not exhaust the search allowance merely because it is available.
+
+Pass 3 — Compact consolidation: Retain only relevant claims, values or bounds, scope, source references, known dates, reliability, evidence type and material uncertainty, using the existing schema. Default to one or two strong observations per signal; add more only to resolve a material ambiguity or satisfy an independent evidence requirement. Keep descriptions concise (normally one or two sentences). Preserve necessary provenance and distinctions between independent observations. Do not reproduce long passages, general background or redundant explanations.
+
+Stop retrieving once there is sufficient evidence for useful supported predictions or when further retrieval is unlikely to materially improve them within the budget. All defined signals must still be represented; unsupported signals may remain Missing with a concise information gap. Do not force coverage or invent evidence. Preserve the minimum evidence, conflict resolution and decision safeguards elsewhere in this policy.
+
+Where supported by the retrieval tool, use the smallest search context that provides sufficient reliable evidence and retrieve relevant excerpts rather than complete documents. Avoid unnecessary page opens and repeated searches. Instructions alone cannot guarantee a bound on tool-returned tokens: runtime configuration and usage monitoring are required to enforce available limits. Pass only compact structured evidence and necessary context to downstream stages, not raw web pages or duplicate research narratives.
+
+2.3. Evidence Reliability
+
+Source                                                                                       Baseline reliability
+
+Observed Navan product data (simulated by manual entry in the demo)                                                                  High
+
+Official company reports                                                                     High
+
+Company website and announcements                                                            Medium–High
+
+Established business publications                                                            Medium–High
+
+Third-party company databases                                                                Medium
+
+Unverified sources                                                                           Low
+
+Final reliability depends on source quality, recency, consistency and relevance to the specific claim.
+
+Assess credibility, recency, specificity, relevance and reporting scope together. Prefer the best-supported observation; newer does not automatically mean more reliable. Distinguish source reliability from confidence in the resulting finding. Submitted lead values and simulated activity are user-reported, not independently verified company statements. Attribute sourced claims to their sources and backend metrics to their submitted inputs.
+
+2.4. Signal Representation
+Each research finding contains:
+
+• Signal value or estimated range.
+
+• Supporting source URLs and publication dates when available. Never invent sources.
+
+• Evidence reliability: High / Medium / Low.
+
+• Evidence type: Direct / Indirect.
+
+• Status: Found / Estimated / Conflicting / Missing.
+
+Signal priority represents its predefined research importance, while evidence reliability represents the
+trustworthiness of the specific finding.
+
+Both are available to the Prediction Engine. Missing information is not negative evidence.
+
+All 12 signals must appear exactly once. Missing is valid, with no evidence items and an explicit information gap. Direct means a source explicitly reports a claim, including an approximate point value or range, and requires a supporting source. Indirect means an inference from genuine supporting context; unsupported inference is missing. Include verified full publication dates when known, otherwise leave them unknown. Preserve independently supported observations even if another item is defective. Separate reliability, estimation uncertainty and unresolved conflict.
+
+3. Prediction & Estimation Rules
+Predictions are based on the signals collected in Section 2, their relevance to each metric and their evidence
+reliability.
+
+3.1. Travel Spend Potential
+Travel spend potential is estimated by combining company scale and expected travel intensity.
+
+Company Scale
+
+Employees                                                       Scale
+
+1–49                                                            Small
+
+50–149                                                          Medium
+
+150–499                                                         Large
+
+500+                                                            Very Large
+
+Derive company scale in the backend from structured employee counts, estimates, inclusive ranges or one-sided bounds applicable to the evaluated entity. Consider scope, measurement basis and period. A reliable lower bound of 500 or more establishes Very Large if applicable to that entity. Use the preferred well-supported observation when weaker or obsolete evidence differs. If unresolved plausible values all fall in one band, assign that band and preserve exact-count uncertainty. If material unresolved uncertainty crosses bands or scope is not established, report Unknown. Do not infer a band from unrelated populations.
+
+Travel Intensity
+
+Signal                                 Assessment basis                                                         Weight
+
+Sales & account management             Team size relative to company size and geographic coverage               3
+
+Customer-facing operations             Extent of on-site services and client-facing activity                    3
+
+Internal collaboration                 Distribution of teams and offices                                        2
+
+International presence                 Geographic distribution relative to company size                         2
+
+Conferences & events                   Participation and frequency                                              1
+
+Each signal is rated Low (0), Medium (1) or High (2), relative to company scale. Industry and work model provide
+context for the assessment.
+
+Travel intensity is calculated by the backend as the weighted average of admitted ratings. AI assesses the ratings and their supporting evidence; the backend computes coverage, intensity and the matrix result.
+
+Weighted score                                                  Intensity
+
+Below 0.67                                                      Low
+
+0.67–1.33                                                       Medium
+
+Above 1.33                                                      High
+
+Use the same admitted ratings for coverage and scoring. Admit only ratings supported by relevant medium- or high-reliability evidence and sufficiently resolved to justify the rating. Weak or unresolved observations may remain contextual. At least 50% of all 11 weight units (at least 6 units) must be admitted. Compare the unrounded weighted score to the stated thresholds. If coverage or scale is insufficient, return Unknown, preserving supported individual findings.
+
+Travel Spend Potential Matrix
+
+Intensity / Scale                Small                   Medium                  Large              Very Large
+
+Low                              Low                     Low                     Medium             High
+
+Medium                           Low                     Medium                  High               High
+
+High                             Medium                  High                    High               Very High
+
+The estimated potential is compared with the reported GBV and assigned tier to identify possible discrepancies. It
+does not represent a numerical GBV prediction.
+
+3.2. Growth Potential
+
+Signal                                                                                  Importance
+
+Business growth                                                                         High
+
+Market expansion                                                                        High
+
+International presence                                                                  Medium
+
+Hiring activity                                                                         Low
+
+Funding                                                                                 Low
+
+Level                  Criteria
+
+High                   Strong evidence of growth or expansion likely to increase travel demand
+
+Medium                 Moderate growth or multiple consistent indirect indicators
+
+Low                    Evidence of stable or declining travel demand
+
+Unknown                Insufficient growth-related evidence
+
+Hiring and funding alone do not justify a High assessment.
+
+3.3. Expected Support Needs
+
+Signal                                                                                  Importance
+
+Operational complexity                                                                  High
+
+Company size                                                                            Medium
+
+International presence                                                                  Medium
+
+Market expansion                                                                        Medium
+
+Industry & work model                                                                   Contextual
+
+Level                  Criteria
+
+High                   Significant organizational or geographic complexity, suggesting substantial onboarding or ongoing
+coordination
+
+Medium                 Moderate complexity, suggesting targeted onboarding assistance
+
+Low                    Evidence of a relatively simple organizational and operational structure
+
+Unknown                Insufficient evidence to assess operational complexity
+
+Support needs represent expected assistance requirements rather than confirmed customer needs.
+
+3.4. Prediction Output
+Each prediction includes:
+
+• Estimated level.
+
+• Confidence level, according to Section 4.
+
+• Supporting signals and rationale.
+
+• Key information gaps — unresolved information that could materially change the prediction.
+
+Missing evidence must not be interpreted as evidence of low potential.
+
+All estimation weights, thresholds and decision matrices are initial heuristics subject to validation and calibration
+using historical customer data.
+
+4. Uncertainty & Confidence Rules
+4.1. Evidence Handling
+
+Missing: apply supported signal-specific fallbacks, otherwise use Missing or Unknown. Missing is not negative evidence.
+
+Conflicts: first determine whether observations describe the same entity, population, measurement and period. Differences in scope or time need not be contradictions. Prefer the best-supported relevant observation, considering reliability and recency together. A weaker or outdated source does not invalidate stronger evidence. Document material alternative observations. If plausible values support the same business classification, preserve it without automatically reducing confidence. If a material disagreement remains but a preferred interpretation is supported, use it and reduce affected confidence as appropriate. If no supported preference is possible, preserve unresolved uncertainty and constrain only dependent conclusions. A material unresolved eligibility conflict blocks actionable change.
+
+Defective observations: safely exclude unsupported or malformed individual observations where independently supported evidence can be preserved without changing factual meaning. If no supported evidence remains, mark the signal Missing. Never invent or silently alter claims, sources, dates or scope.
+
+Duplicates: count underlying observations once, including repeated reporting by multiple publications.
+
+Indirect evidence: preserve its inferred nature and account for reliability.
+
+4.2. Prediction Confidence
+Confidence is assessed independently for each prediction based on signal importance, evidence coverage,
+reliability and consistency.
+
+Confidence                 Criteria
+
+High                       Most important signals are supported by reliable, consistent evidence
+
+Medium                     Sufficient evidence, with meaningful gaps or indirect estimates
+
+Low                        Minimum evidence requirements are met, but significant uncertainty remains
+
+Insufficient               Minimum evidence requirements are not met
+
+Material unresolved disagreement prevents High confidence in the affected prediction. Resolved disagreements and uncertainty that does not affect the classification do not automatically lower confidence. Weak evidence may provide context without meeting minimum evidence requirements.
+
+4.3. Minimum Evidence Requirements
+
+Prediction                            Minimum requirements
+
+Travel Spend Potential                Supported company scale and at least 50% of travel intensity signal weight
+supported by medium- or high-reliability evidence
+
+Growth Potential                      At least one relevant medium- or high-reliability primary indicator, or two independent medium- or high-reliability secondary indicators pointing in the same direction over comparable periods
+
+Expected Support Needs                Relevant medium- or high-reliability evidence of organizational complexity, supported by relevant contextual observations
+
+Insufficient confidence results in an Unknown prediction. Other independently supported predictions remain valid.
+
+Information gaps that could materially change the prediction are explicitly reported to support targeted follow-up
+decisions (Section 5).
+
+5. Business Decision Rules
+5.1. Tier Alignment
+
+Travel Spend Potential           Tier 3                           Tier 2                         Tier 1
+
+Low                              Consistent                       Potential overclassification   Potential overclassification
+
+Medium                           Potential                        Consistent                     Potential overclassification
+underclassification
+
+High                             Potential                        Consistent                     Consistent
+underclassification
+
+Very High                        Potential                        Potential                      Consistent
+underclassification              underclassification
+
+Unknown                          Undetermined                     Undetermined                   Undetermined
+
+Calculate the alignment matrix deterministically. Qualitative travel alignment is distinct from formal eligibility.
+
+5.2. Recommendation Rules
+
+Condition                                  Recommended action
+
+Consistent classification                  Retain current tier
+
+Potential mismatch, high confidence        Recommend tier change where justified
+
+Potential mismatch, medium                 Follow up to verify tier eligibility
+confidence
+
+High growth potential                      Strengthen upgrade recommendations, reconsider downgrades and consider
+proactive sales engagement
+
+High expected support needs                Consider a higher tier or additional human assistance
+
+Low or insufficient confidence             Keep operational tier unchanged; use Retain or Undetermined as appropriate and collect material missing information where justified
+
+Tier recommendations consider all three predictions, reported GBV and existing eligibility criteria. Qualitative predictions alone do not establish eligibility for a different tier.
+
+Initial assignment uses submitted lead information and the existing Section 1 thresholds. For subsequent lead recommendations, relevant, sufficiently reliable, scoped research employee evidence may establish eligibility when it resolves missing, outdated or inaccurate submitted headcount. Preserve original submitted data; do not overwrite it with research estimates. Use exact counts or bounds only where they establish the applicable eligibility threshold. A qualitative travel prediction is not numerical GBV.
+
+The backend calculates permissible tier targets and qualifying evidence before Decision generation. A change requires a permissible target, relevant supporting evidence, High confidence for the lead mismatch under the rules above, and meaningful business justification. A material unresolved eligibility disagreement requires verification follow-up, not an actionable change. Growth and support needs may strengthen justification or support follow-up, but cannot override eligibility. Human approval remains mandatory.
+
+5.3. Recommendation Output
+• Tier recommendation: Retain / Upgrade / Downgrade / Undetermined, based on the company profile,
+predictions and the above decision rules. Store recommended_tier as the proposed tier, the current tier for Retain, or null for Undetermined. A follow-up to verify eligibility is not an approved tier change.
+
+• Confidence: Based on the confidence of the predictions driving the tier recommendation (Predictions input).
+
+• Key findings and rationale: Based on the supporting signals and rationale (Predictions input) and the applied
+decision rules.
+
+• Recommended follow-ups: Business actions derived from identified tier mismatches, growth potential and
+expected support needs (Predictions input).
+
+• Additional information required: Information needed to resolve relevant information gaps (Predictions input)
+and support a revised recommendation.
+
+Separate alignment, recommendation and follow-up. Retain means evidence supports keeping the current tier with no justified change. Undetermined means evidence is insufficient to assess the appropriate tier. Unknown travel potential implies Undetermined travel alignment, but does not automatically determine the operational recommendation. An apparent mismatch without sufficient eligibility or confidence results in verification follow-up. Both Retain and Undetermined leave the operational tier unchanged and are not actionable. Only supported Upgrade or Downgrade recommendations may be actionable. Material subsequent updates supersede outdated pending recommendations.
+
+Follow-ups and information requests must be justified by expected business impact.
+
+Recommendations do not automatically modify the assigned tier. Present the recommendation, evidence, rationale, confidence, follow-up actions and information gaps in the chat. Only an explicit user acceptance of a proposed tier change updates the current tier; record the change in tier history.
+
+6. Post-Signup Re-evaluation Rules
+
+6.1. Product Signals
+
+Each activity submission is a summarized snapshot, not a monthly record. The demo uses manually supplied data to simulate Navan product information.
+
+- months_since_signup: number of completed months since signup (required, positive integer).
+- total_gbv: total gross booking value in USD since signup.
+- avg_monthly_bookings: average bookings per month since signup.
+- employee_count: current employee count.
+- avg_monthly_active_users: average monthly active users since signup.
+- avg_monthly_support_requests: average monthly support requests since signup.
+- travel_spend_trend, company_size_trend, product_adoption_trend: increasing / stable / decreasing / unknown, as reported by the user for the observation period.
+
+Apart from months_since_signup, activity measurements may be missing. Do not treat missing values as zero. Zero is valid for GBV, bookings, active users and support requests. Trends are user-reported qualitative observations, not independently calculated or verified growth rates.
+
+Derived metrics (calculate deterministically):
+- Annualized GBV (USD/year) = total_gbv / months_since_signup * 12. Use for tier eligibility only after at least three completed months. This is an indicative run rate, not a forecast.
+- Estimated adoption rate (%) = 100 * avg_monthly_active_users / employee_count. This is an approximation because the numerator is a historical average and the denominator is current.
+- Monthly support rate = 100 * avg_monthly_support_requests / avg_monthly_active_users.
+Calculate only with known inputs and positive denominators. Report unavailable or inconsistent metrics rather than inventing values.
+
+6.2. Re-evaluation Triggers
+
+Evaluate the latest submitted snapshot against the current tier and the following signals:
+- Annualized GBV or current employee count indicates a potential mismatch with Section 1 tier eligibility. Missing eligibility inputs are unknown, not below threshold; do not infer lower eligibility from an unknown input.
+- Travel spend trend is increasing or decreasing.
+- Company size trend is increasing or decreasing.
+- Product adoption trend is increasing or decreasing.
+- Monthly support rate is at least 5 requests per 100 active users.
+
+A first snapshot can trigger evaluation without a previous recorded threshold crossing. Skip triggers with unavailable inputs. If no trigger is assessable, report insufficient data. If assessable but none fires, report no material trigger and retain the current tier without running AI re-evaluation. The demo checks these triggers on manual submission. Monthly growth percentages and persistence cannot be verified from summary inputs.
+
+No material trigger means none of the assessable triggers fired; identify skipped triggers and missing inputs. Explain adoption above 100% as a ratio of historical average active users to current employee count.
+
+6.3. Recommendation Rules
+
+- Observed annualized GBV or current company size meets higher tier criteria: recommend upgrade where evidence is sufficient.
+- Declining travel spend: investigate barriers and potential overclassification. Customer downgrades are disabled in this demo; keep the operational tier and recommend follow-up as appropriate.
+- Increasing company size and adoption: strengthen upgrade consideration and proactive engagement.
+- Increasing company size with stable or declining adoption: investigate barriers and consider additional support.
+- Stable company size with increasing adoption: assess expansion potential using available GBV and adoption evidence.
+- Increasing travel spend: assess tier suitability and expansion opportunities.
+- Declining adoption: investigate barriers and recommend appropriate follow-up; do not propose a customer downgrade.
+- High support demand: consider additional human assistance or a higher tier where eligibility is supported.
+
+Average bookings provide context about activity volume, not booking growth. Qualitative trends alone do not establish tier eligibility. Consider combined observations, existing eligibility criteria and expected business impact. Do not recommend a tier change when the supporting evidence is insufficient.
+
+The backend establishes permissible upgrade targets and qualifying observations from the latest snapshot. If known headcount establishes Tier 2 while GBV leaves Tier 1 unverified, Tier 2 may be recommended and the remaining uncertainty documented. Use at least Medium confidence, sufficient observation duration and relevant qualifying evidence. A trigger alone does not establish a justified change.
+
+6.4. Recommendation Confidence
+
+- High: not assigned from summary snapshots alone in the demo because monthly stability and sustained trends cannot be independently assessed.
+- Medium: at least three completed months with sufficient, coherent reported measurements supporting the recommendation.
+- Low: shorter observation, sparse data, low activity volume or meaningful uncertainty despite some supporting evidence.
+- Insufficient: evidence needed for the specific recommendation is unavailable.
+
+Assess confidence in the specific recommendation, not customer tenure alone. Report material gaps and inconsistencies. User-reported trends do not establish verified persistence. Low or insufficient confidence favors retention or follow-up rather than a tier change.
+
+6.5. Recommendation Output
+
+Use Section 5.3 output with findings, rationale, confidence and gaps derived from the latest submitted product activity snapshot and current tier. Do not use earlier predictions, recommendations, research or submitted annual GBV as inference inputs. Do not perform external research. Require the explicitly reported current tier in every activity submission. Treat it as the externally assigned tier; when it differs from the stored tier, record an external change separately from recommendation approval. Store each submitted snapshot separately. Only explicit user acceptance may apply a system-recommended tier change.
+
+All additional numerical thresholds are initial demo heuristics subject to validation and calibration using Navan historical customer data.
+
+
+7. Validation and Recovery
+
+Hard validation: enforce structural integrity, workspace boundaries, provenance integrity, permissible targets and actionable decision requirements. Reject final defects that cannot be safely isolated or corrected.
+
+Soft validation: retain warnings, information gaps and uncertainty for incomplete, weak, outdated or conflicting evidence. These must not independently terminate an otherwise usable evaluation.
+
+Deterministic normalization: compute derived values and classifications in code, normalize safe formatting and duplicate references, and exclude individual unsupported observations only when isolation is safe. Reassess affected statuses and dependent conclusions. Do not silently alter facts.
+
+Retain one bounded tool-free AI correction attempt per stage for recoverable defects not safely handled in code. Supply original context, invalid output and precise diagnostics (multiple independent diagnostics when practical). Do not restart completed stages or repeat web research. Never bypass final validation or allow unsupported actions. If correction fails and safe isolation is impossible, stop the affected stage and preserve completed work.

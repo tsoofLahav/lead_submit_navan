@@ -1,0 +1,7 @@
+1. Use the backend-provided permissible targets and qualifying observations, respecting the metric limitations in §6.1. For a headcount-only Tier 2 target, explain that Tier 1 remains unverified. Customer downgrades are disabled.
+2. Determine the tier recommendation and follow-ups using §6.3. Qualitative trends alone do not establish eligibility.
+3. Determine recommendation confidence using §6.4. Do not assign confidence above Medium from summary snapshots alone.
+4. Return the recommendation, supporting findings, rationale, follow-ups and information gaps (§6.5, §5.3), including the recommended_tier mapping, using the supplied schema. Do not modify the assigned tier.
+
+Inputs: {{current_tier}}, {{validated_product_assessment}}
+Output schema: {{recommendation_schema}}
