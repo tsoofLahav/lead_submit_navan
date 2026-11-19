@@ -225,9 +225,11 @@ def test_approval_confirmation_reads_current_status_and_stays_in_thread(sessions
     assert not rows[-2].metadata["approval_available"]
 
 
-def test_message_write_failure_replays_only_prepared_result(sessions, workspace_ids, monkeypatch):
+def test_message_write_failure_replays_only_prepared_result(sessions, workspace_ids, monkeypatch, references):
     owner, _ = workspace_ids
-    chat = ChatAssistant(sessions)
+    from test_customer_reevaluation import uncertain_responses
+    ai, _ = mock_client(*uncertain_responses())
+    chat = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=ai))
     activity = CustomerActivityInput("Acme", "acme.test", 3, 1)
     store = chat.save_prepared_message
 
@@ -242,12 +244,12 @@ def test_message_write_failure_replays_only_prepared_result(sessions, workspace_
     monkeypatch.setattr(chat, "save_prepared_message", store)
     recovery = chat.save_prepared_message(owner, failure.draft)
     assert chat.save_prepared_message(owner, failure.draft).id == recovery.id
-    assert recovery.metadata["kind"] == MessageKind.ACTIVITY
-    assert "could not be assessed" in recovery.content or "insufficient" in recovery.content.lower()
+    assert recovery.metadata["kind"] == MessageKind.EVALUATION
+    assert "undetermined" in recovery.content.lower()
     assert len(chat.list_messages(owner, recovery.conversation_id)) == 2
     with sessions() as session:
         assert session.scalar(select(func.count(ProductActivity.id))) == 1
-        assert session.scalar(select(func.count(Evaluation.id))) == 0
+        assert session.scalar(select(func.count(Evaluation.id))) == 1
 
 
 
@@ -277,9 +279,11 @@ def test_business_failure_is_persisted_as_distinct_message(sessions, workspace_i
 
 
 
-def test_workflow_without_selected_conversation_reuses_workspace_thread(sessions, workspace_ids):
+def test_workflow_without_selected_conversation_reuses_workspace_thread(sessions, workspace_ids, references):
     owner, outsider = workspace_ids
-    chat = ChatAssistant(sessions)
+    from test_customer_reevaluation import uncertain_responses
+    ai, _ = mock_client(*uncertain_responses())
+    chat = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=ai))
     original = chat.create_conversation(owner)
     foreign = chat.create_conversation(outsider)
     result = chat.submit_customer_reevaluation(

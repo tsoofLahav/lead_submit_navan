@@ -14,7 +14,7 @@ from app.models import Company, CompanyResearch, DemoCompany, Evaluation, Produc
 from app.orchestrator import Orchestrator
 from test_ai import message as response_message, mock_client, scoped_evidence, terminal
 from test_chat import call, final, references
-from test_customer_reevaluation import assessment, recommendation
+from test_customer_reevaluation import assessment, recommendation, uncertain_responses
 from test_lead_submission import decision_data, prediction_data, research_data, response as lead_response
 
 pytestmark = pytest.mark.write_integration
@@ -109,35 +109,22 @@ def test_lead_real_persistence_stream_and_duplicate(web, sessions, references):
     assert len(requests) == 3
 
 
-def test_gate_only_and_decimal_null_validation(web, sessions):
+def test_customer_optional_amounts_and_first_snapshot_evaluation(web, sessions, references):
+    business, requests = mock_client(*uncertain_responses(), *uncertain_responses())
+    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
+        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    )
     client = web.test_client()
     path = thread(client)
     assert post(client, path + "/customer-activity", payload("Bad", current_tier=None)).status_code == 400
     assert post(client, path + "/customer-activity", payload("Bad", avg_monthly_bookings="invalid")).status_code == 400
-    for key, label in (("total_gbv", "Total GBV since signup (USD)"),
-                       ("avg_monthly_bookings", "Average monthly bookings")):
-        invalid = payload("Bad")
-        del invalid[key]
-        response = post(client, path + "/customer-activity", invalid)
-        assert response.status_code == 400
-        assert response.json["error"]["message"] == f"{label} is required."
-    for name, values, status in [
-        ("Quiet", {"total_gbv": "0", "employee_count": 40}, "NO_TRIGGER"),
-        ("Sparse", {"months_since_signup": 2}, "INSUFFICIENT_DATA"),
-    ]:
+    for name, values in (("Quiet", {"employee_count": 40}), ("Sparse", {"total_gbv": None, "avg_monthly_bookings": None})):
         events = frames(post(client, path + "/customer-activity", payload(name, **values)))
-        assert events[-1][0] == "result"
         metadata = events[-1][1]["message"]["metadata"]
-        assert metadata["kind"] == "activity_update" and metadata["evaluation_id"] is None
-        assert metadata["result"]["gate"]["status"] == status
-        assert not any(event.get("component") for kind, event in events if kind == "progress")
-    with sessions() as session:
-        snapshots = {company.name: activity for company, activity in session.execute(
-            select(Company, ProductActivity).join(ProductActivity, ProductActivity.company_id == Company.id),
-        )}
-        assert snapshots["Quiet"].total_gbv == 0 and snapshots["Quiet"].avg_monthly_bookings == 0
-        assert snapshots["Sparse"].avg_monthly_active_users is None
-        assert session.scalar(select(func.count(Evaluation.id))) == 0
+        assert metadata["kind"] == "evaluation_result" and metadata["result"]["recommendation"]["outcome"] == "undetermined"
+    repeat = frames(post(client, path + "/customer-activity", payload("Quiet", employee_count=40)))[-1][1]["message"]
+    assert repeat["metadata"]["result"]["unchanged"] and "No new evaluation" in repeat["content"]
+    assert len(requests) == 4
 
 
 @pytest.mark.parametrize("accept", [True, False])
@@ -177,7 +164,7 @@ def test_chat_tool_and_explicit_retry(web, sessions, references):
 
 def test_workflow_and_message_only_retry(web, sessions, references, monkeypatch):
     business, _ = mock_client(500, lead_response(research_data(), research=True),
-                              lead_response(prediction_data()), lead_response(decision_data()))
+                              lead_response(prediction_data()), lead_response(decision_data()), *uncertain_responses())
     service = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=business))
     web.extensions["http_chat_factory"] = lambda _: service
     client = web.test_client()
@@ -200,11 +187,12 @@ def test_workflow_and_message_only_retry(web, sessions, references, monkeypatch)
     assert frames(post(client, path + "/retry", save_failure["retry"]))[-1][0] == "result"
     with sessions() as session:
         assert session.scalar(select(func.count(ProductActivity.id))) == 1
-        assert session.scalar(select(func.count(Evaluation.id))) == 1
+        assert session.scalar(select(func.count(Evaluation.id))) == 2
 
 
-def test_disconnect_does_not_cancel_and_other_thread_can_load(web, sessions, monkeypatch):
-    service = ChatAssistant(sessions)
+def test_disconnect_does_not_cancel_and_other_thread_can_load(web, sessions, monkeypatch, references):
+    business, _ = mock_client(*uncertain_responses())
+    service = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=business))
     web.extensions["http_chat_factory"] = lambda _: service
     original = service.submit_customer_reevaluation
     started, release, done = Event(), Event(), Event()

@@ -342,23 +342,18 @@ def validate_recommendation(
         require(lead is not None and research is not None, "Lead recommendation requires the validated lead and research.",
                 "recommendation.lead_context", "5.2", "context", {"lead_present": lead is not None, "research_present": research is not None})
         available = lead_recommendation_evidence(assessment, research, lead)
-        travel = assessment.travel_spend_potential
-        mismatch = travel.level in UPGRADE_TRAVEL_LEVELS[current_tier] | DOWNGRADE_TRAVEL_LEVELS[current_tier]
-        if output.outcome == "retain" and mismatch and not permissible_targets:
-            eligible = possible_eligible_tiers(lead.submitted_annual_gbv, 12, lead.employee_count)
-            require(eligible == {current_tier}, "The apparent mismatch is unresolved. Use Undetermined.",
+        if permissible_targets is None:
+            from .revised_policy import lead_targets
+            permissible_targets = lead_targets(lead, current_tier, research, assessment)
+        if output.outcome == "retain":
+            require(current_tier in permissible_targets, "The current support model is not established. Use Undetermined.",
                     "recommendation.retain_unsupported", "5.3", "outcome", output.outcome)
         if changes_tier:
-            require(output.confidence == "high" and travel.confidence == "high",
-                    "Lead tier changes require high-confidence evidence of a mismatch.",
-                "recommendation.lead_confidence", "5.2", "confidence", {"recommendation": output.confidence, "travel": travel.confidence})
-            applicable_levels = (
-                UPGRADE_TRAVEL_LEVELS if output.outcome == "upgrade" else DOWNGRADE_TRAVEL_LEVELS
-            )
-            require(travel.level in applicable_levels[current_tier],
-                    "Lead recommendation direction disagrees with the tier alignment matrix.",
-                "recommendation.lead_alignment", "5.1", "outcome", output.outcome)
-            eligible = possible_eligible_tiers(lead.submitted_annual_gbv, 12, lead.employee_count)
+            require(output.confidence in {"medium", "high"}, "Lead tier changes require at least Medium confidence.",
+                    "recommendation.lead_confidence", "5.2", "confidence", output.confidence)
+            require(not getattr(output, "material_suitability_uncertainty", False),
+                    "Material uncertainty blocks an actionable lead recommendation.",
+                    "recommendation.lead_uncertainty", "5.2", "material_suitability_uncertainty", True)
     else:
         require(activity is not None and metrics is not None and triggers is not None,
                 "Re-evaluation recommendation requires the current activity and gate result.",
@@ -395,16 +390,16 @@ def validate_recommendation(
     if changes_tier:
         require(bool(references), "A proposed tier change requires supporting evidence.",
                 "recommendation.missing_evidence", "5.3", "supporting_evidence", [])
-        if permissible_targets is not None:
-            require(target in permissible_targets, "The backend did not establish this tier target.",
-                    "recommendation.eligibility", "1, 5.2, 6.3", "recommended_tier", target)
-            qualifying = set(permissible_targets[target])
-            all_required = output.outcome == "downgrade" or isinstance(assessment, LeadPredictionOutput) and target == 3
-            cited = qualifying <= references if all_required else bool(references & qualifying)
-            require(cited, "Cite qualifying eligibility evidence.",
-                    "recommendation.qualifying_evidence", "5.2, 6.3", "supporting_evidence",
-                    {"qualifying_fields": permissible_targets[target], "qualifying_references": 0})
-            return
-        established = eligible == {target} if output.outcome == "downgrade" else max(eligible) == target
-        require(established, "Known eligibility inputs do not establish the proposed tier.",
-                "recommendation.eligibility", "1, 5.2, 6.3", "recommended_tier", target)
+        require(target in permissible_targets, "The backend did not establish this tier target.",
+                "recommendation.eligibility", "5.2, 6.3", "recommended_tier", target)
+        qualifying = set(permissible_targets[target])
+        all_required = isinstance(assessment, LeadPredictionOutput) or output.outcome == "downgrade"
+        cited = qualifying <= references if all_required else bool(references & qualifying)
+        if isinstance(assessment, LeadPredictionOutput) and output.confidence == "high":
+            prediction_keys = qualifying & {"travel_spend_potential", "growth_potential", "expected_support_needs"}
+            require(all(getattr(assessment, key).confidence == "high" for key in prediction_keys),
+                    "High recommendation confidence requires High confidence in its forecast basis.",
+                    "recommendation.lead_confidence_basis", "5.2", "confidence", output.confidence)
+        require(cited, "Cite qualifying evidence for the proposed tier.",
+                "recommendation.qualifying_evidence", "5.2, 6.3", "supporting_evidence",
+                {"qualifying_fields": permissible_targets[target], "qualifying_references": 0})

@@ -1,5 +1,5 @@
 Business Prediction Policy
-Demo edition — simplified research, customer tier changes and concise outputs (19 November 2026)
+Demo edition — forecast-based lead recommendations, customer tier changes, change-based re-evaluation and concise outputs (19 November 2026)
 
 1. Business Context
 Available data
@@ -14,7 +14,7 @@ Post-signup                        Manually entered customer activity summary an
 
 For lead submissions, the customer-provided GBV is required but may underestimate or overestimate actual potential.
 
-Existing Tier Assignment
+Initial Lead Assignment and Post-Signup Eligibility
 
 Tier              Eligibility                                                  Support model
 
@@ -25,7 +25,7 @@ Tier 2            GBV ≥ $100K or 150+ employees, unless Tier 1 applies        
 Tier 3            All other companies                                          Primarily product-led
 
 1.1. System Responsibility
-Flexible on information, strict on decisions and actions. AI interprets evidence, relevance, credibility, uncertainty and business implications. The backend owns deterministic calculations, classifications, eligibility and action constraints. Intermediate uncertainty limits dependent conclusions rather than invalidating the entire evaluation. Validation becomes stricter toward actionable recommendations and actual tier changes. System-recommended tier changes require explicit human approval.
+Flexible on information, strict on decisions and actions. AI interprets evidence, relevance, credibility, uncertainty and business implications. The backend owns deterministic calculations, classifications, quantitative eligibility where applicable, and stage-specific action constraints. Initial lead assignment and post-signup eligibility use the numerical thresholds in Section 1; lead recommendations use forecast-based business suitability under Section 5. Intermediate uncertainty limits dependent conclusions rather than invalidating the entire evaluation. Validation becomes stricter toward actionable recommendations and actual tier changes. System-recommended tier changes require explicit human approval.
 
 2. Research Signals & Evidence
 2.1. Research Signals
@@ -46,7 +46,7 @@ The objective is to collect the smallest useful set of evidence for the defined 
 
 Pass 1 — Targeted retrieval: Aim for two or three focused searches overall, within the runtime search ceiling. Combine company size, external activity and geographic footprint where possible; reuse evidence for growth and complexity. Do not search separately for corporate events unless readily available and material. Verify company identity and search for specific facts that support high-priority signals. Group related signals into focused queries when useful. Prefer concise authoritative sources and relevant passages over general company profiles or entire reports. Use search snippets when they provide sufficient attributable evidence; open a source only when necessary to establish the claim, scope, reliability or material uncertainty.
 
-Pass 2 — Selective completion: Search for missing or disputed evidence only when it could materially affect a prediction, eligibility or a useful business follow-up. Prioritize the minimum evidence requirements in Section 4.3. Reuse relevant findings across signals rather than retrieving the same information again. Do not exhaust the search allowance merely because it is available.
+Pass 2 — Selective completion: Search for missing or disputed evidence only when it could materially affect a prediction, lead suitability or a useful business follow-up. Do not search for proof of a prospect’s Navan GBV or require a public numerical travel budget to recommend a tier. Prioritize the minimum evidence requirements in Section 4.3. Reuse relevant findings across signals rather than retrieving the same information again. Do not exhaust the search allowance merely because it is available.
 
 Pass 3 — Compact consolidation: Retain only relevant claims, values or bounds, scope, source references, known dates, reliability, evidence type and material uncertainty, using the simplified six-signal schema. Default to one or two strong observations per signal; add more only to resolve a material ambiguity or satisfy an independent evidence requirement. Keep descriptions concise (normally one or two sentences). Preserve necessary provenance and distinctions between independent observations. Do not reproduce long passages, general background or redundant explanations.
 
@@ -122,7 +122,7 @@ External business activity     Client-facing business and likely travel requirem
 Geographic distribution        Distributed operations and likely cross-location travel     2
 Corporate events               Business events and employee gatherings                     1
 
-Rate each signal Low (0), Medium (1) or High (2), relative to company scale. Credible qualitative evidence of business activities and geographic structure can support inferred ratings without exact travel frequencies, traveler percentages or trip counts. Distinguish expected intensity from observed travel. A source may support multiple distinct claims, but do not double-count the same underlying observation as independent corroboration.
+Rate each signal Low (0), Medium (1) or High (2), relative to company scale. Credible qualitative evidence of business activities and geographic structure can support inferred ratings without exact travel frequencies, traveler percentages or trip counts. Choose the most plausible rating supported by the evidence, reflecting uncertainty in confidence. Do not exclude relevant evidence merely because actual travel frequency is unavailable. Distributed operations, partner-facing work and events can support inferred ratings when the relationship to likely travel is explained; their existence alone does not mandate a High rating. Distinguish expected intensity from observed travel. A source may support multiple distinct claims, but do not double-count the same underlying observation as independent corroboration.
 
 The backend calculates the weighted average of admitted ratings, coverage and matrix result. Admit relevant medium- or high-reliability direct or indirect evidence that supports a sufficiently resolved rating. Exclude missing ratings from the score, not from the total possible weight of five.
 
@@ -223,7 +223,7 @@ Confidence                 Criteria
 
 High                       Most important signals are supported by reliable, consistent evidence
 
-Medium                     Sufficient evidence, with meaningful gaps or indirect estimates
+Medium                     Sufficient evidence, with meaningful gaps or uncertainty in the inference
 
 Low                        Minimum evidence requirements are met, but significant uncertainty remains
 
@@ -259,37 +259,38 @@ underclassification              underclassification
 
 Unknown                          Undetermined                     Undetermined                   Undetermined
 
-Calculate the alignment matrix deterministically. Qualitative travel alignment is distinct from formal eligibility.
+Calculate the alignment matrix deterministically. Qualitative travel alignment is a starting point for lead suitability, not a numerical eligibility test. Post-signup eligibility follows Section 6.
 
-5.2. Recommendation Rules
+5.2. Lead Recommendation Rules
 
-Condition                                  Recommended action
+Initial assignment uses only submitted GBV and employee information, applying Section 1. A subsequent lead recommendation is a forecast-based proposal for the appropriate support model, not a certification of quantitative eligibility. The submitted GBV and employee count remain relevant context, but the numerical thresholds do not restrict lead recommendation targets. Never overwrite submitted data or invent a numerical GBV forecast.
 
-Consistent classification                  Retain current tier
+Use travel potential as the primary suitability indicator:
 
-Potential mismatch, high confidence        Recommend tier change where justified
+Travel potential                 Baseline suitable tier(s)
+Low                              Tier 3
+Medium                           Tier 2
+High                             Tier 2 or Tier 1
+Very High                        Tier 1
+Unknown                          No travel-based target
 
-Potential mismatch, medium                 Follow up to verify tier eligibility
-confidence
+Growth potential informs future opportunity and investment; expected support needs inform the appropriate level of human assistance. Use them to refine the baseline, including choosing between Tier 2 and Tier 1 for High travel potential. A departure from the baseline requires explicit, evidence-backed business justification. Strong growth or support evidence may justify a higher-touch tier; low support needs alone do not establish low travel potential. Do not downgrade solely because a signal is missing.
 
-High growth potential                      Strengthen upgrade recommendations, reconsider downgrades and consider
-proactive sales engagement
+Consider submitted GBV, submitted and researched headcount, scope and all available predictions. Reliable researched headcount may independently support correcting initial underclassification. A substantial difference between reported GBV and predicted potential is a reason to explain the discrepancy and request material verification, not an automatic veto. Do not claim that a forecast-based recommendation satisfies the numerical GBV thresholds.
 
-High expected support needs                Consider a higher tier or additional human assistance
+High or Medium recommendation confidence permits Upgrade or Downgrade when a specific target is supported by meaningful business justification. Low or Insufficient confidence does not permit a tier change. Assess confidence using the evidence actually driving the decision; a missing secondary prediction does not invalidate independently supported conclusions. If travel potential is Unknown, another independently supported combination of evidence may justify a recommendation only when it establishes a specific support-model fit with at least Medium confidence; otherwise return Undetermined.
 
-Low or insufficient confidence             Keep operational tier unchanged; use Retain or Undetermined as appropriate and collect material missing information where justified
+The backend validates the stage, target tier, direction, confidence, evidence references, material uncertainty and approval requirements. It must not restrict lead changes to targets satisfying observed or submitted GBV thresholds. Unresolved uncertainty that materially undermines the proposed support-model fit blocks the actionable recommendation; uncertainty about exact future GBV alone does not. Use Retain when the existing tier is supported and no change is justified. Use Undetermined when available evidence cannot support a specific appropriate tier.
 
-Tier recommendations consider all three predictions, reported GBV and existing eligibility criteria. Qualitative predictions alone do not establish eligibility for a different tier.
+Example: a Tier 2 prospect reporting $50K GBV with Very High travel potential and High expected support needs at Medium confidence may receive a Tier 1 upgrade recommendation. Explain the forecast basis and reported GBV discrepancy without claiming $500K GBV eligibility. Human approval is mandatory.
 
-Initial assignment uses submitted lead information and the existing Section 1 thresholds. For subsequent lead recommendations, relevant, sufficiently reliable, scoped research employee evidence may establish eligibility when it resolves missing, outdated or inaccurate submitted headcount. Preserve original submitted data; do not overwrite it with research estimates. Use exact counts or bounds only where they establish the applicable eligibility threshold. A qualitative travel prediction is not numerical GBV.
-
-The backend calculates permissible tier targets and qualifying evidence before Decision generation. A change requires a permissible target, relevant supporting evidence, High confidence for the lead mismatch under the rules above, and meaningful business justification. A material unresolved eligibility disagreement requires verification follow-up, not an actionable change. Growth and support needs may strengthen justification or support follow-up, but cannot override eligibility. Human approval remains mandatory.
+These rules apply only to lead recommendations. Customer re-evaluation follows Section 6 and retains quantitative eligibility constraints.
 
 5.3. Recommendation Output
 • Tier recommendation: Retain / Upgrade / Downgrade / Undetermined, based on the company profile,
 predictions and the above decision rules. Store recommended_tier as the proposed tier, the current tier for Retain, or null for Undetermined. A follow-up to verify eligibility is not an approved tier change.
 
-• Confidence: Based on the confidence of the predictions driving the tier recommendation (Predictions input).
+• Confidence: Based on the evidence and predictions or product assessment driving the stage-specific tier recommendation.
 
 • Key findings and rationale: Based on the supporting signals and rationale (Predictions input) and the applied
 decision rules.
@@ -300,7 +301,7 @@ expected support needs (Predictions input).
 • Additional information required: Information needed to resolve relevant information gaps (Predictions input)
 and support a revised recommendation.
 
-Separate alignment, recommendation and follow-up. Retain means evidence supports keeping the current tier with no justified change. Undetermined means evidence is insufficient to assess the appropriate tier. Unknown travel potential implies Undetermined travel alignment, but does not automatically determine the operational recommendation. An apparent mismatch without sufficient eligibility or confidence results in Undetermined and verification follow-up when the appropriate tier cannot be established; do not label an unsupported change as Retain merely because it is blocked. Both Retain and Undetermined leave the operational tier unchanged and are not actionable. Only supported Upgrade or Downgrade recommendations may be actionable. Material subsequent updates supersede outdated pending recommendations.
+Separate alignment, recommendation and follow-up. Retain means evidence supports keeping the current tier with no justified change. Undetermined means evidence is insufficient to assess the appropriate tier. Unknown travel potential implies Undetermined travel alignment, but does not automatically determine the operational recommendation. An apparent mismatch without sufficient stage-specific suitability evidence (lead) or eligibility evidence (customer), or without sufficient confidence, results in Undetermined and verification follow-up when the appropriate tier cannot be established; do not label an unsupported change as Retain merely because it is blocked. Both Retain and Undetermined leave the operational tier unchanged and are not actionable. Only supported Upgrade or Downgrade recommendations may be actionable. Material subsequent updates supersede outdated pending recommendations.
 
 Follow-ups and information requests must be justified by expected business impact.
 
@@ -308,7 +309,15 @@ Recommendations do not automatically modify the assigned tier. Present the recom
 
 5.4. Concise User-Facing Responses
 
-Lead with the recommendation and the main business reason in two or three short sentences. For each prediction, provide one or two concise sentences explaining the strongest supporting evidence and material uncertainty. Default to one or two actionable follow-ups or information gaps per evaluation, only when they could materially affect a decision. Avoid repeating findings across rationale, evidence, gaps and follow-ups. Keep structured evidence and source references available for inspection without repeating them in narrative fields. Do not omit material uncertainty, eligibility constraints or provenance for brevity. Chat answers should be direct and concise by default; expand when requested. Internal analysis and validation remain unchanged.
+Default presentation: show recommendation, confidence and decision status first; then the three lead predictions (or relevant customer assessment), followed by the most important next steps. Keep detailed research, sources, metric references and validation details available in collapsed expandable sections. Do not render internal execution diagnostics as business findings.
+
+Recommendation rationale: normally no more than 50 words, explaining the proposed action and its principal business reason, including any material limitation. Lead recommendations must distinguish forecast suitability from numerical eligibility when relevant.
+
+Prediction rationale: normally no more than 30 words per prediction, stating its strongest evidence and material uncertainty. Research descriptions: normally no more than 40 words per signal, excluding structured source metadata. Supporting evidence and key findings should use references or compact unique facts rather than repeating prediction or recommendation narratives.
+
+Information gaps and follow-up actions: default to at most two distinct, actionable next steps in total, combining a gap with its corresponding verification action where possible. Do not request exact trip counts or numerical GBV merely to make a qualitative forecast. Request them only when useful for a concrete business decision or customer eligibility check.
+
+Keep the existing structured fields and source references for traceability. Deduplicate overlapping content in generation and presentation; do not display empty or redundant sections. Chat answers should be direct and concise by default, expanding on request. Word limits are writing targets, not hard validation gates; preserve material caveats, provenance and safety constraints. Internal analysis and validation remain unchanged.
 
 6. Post-Signup Re-evaluation Rules
 
@@ -332,18 +341,20 @@ Derived metrics (calculate deterministically):
 - Monthly support rate = 100 * avg_monthly_support_requests / avg_monthly_active_users.
 Calculate only with known inputs and positive denominators. Report unavailable or inconsistent metrics rather than inventing values.
 
-6.2. Re-evaluation Triggers
+6.2. Re-evaluation Initiation and Business Indicators
 
-Evaluate the latest submitted snapshot against the current tier and the following signals:
-- Annualized GBV or current employee count indicates a potential mismatch with Section 1 tier eligibility. Missing eligibility inputs are unknown, not below threshold; do not infer lower eligibility from an unknown input.
-- Travel spend trend is increasing or decreasing.
-- Company size trend is increasing or decreasing.
-- Product adoption trend is increasing or decreasing.
+Run re-evaluation on the first valid customer activity submission and whenever normalized activity inputs or the explicitly reported current tier differ from the latest previously submitted snapshot and its associated tier. Newly available information and changes from known to unknown values count as changes. Compare business values, not timestamps, record IDs or formatting. Do not require a threshold crossing, a business mismatch or a minimum number of available metrics to initiate assessment.
+
+Skip repeated equivalent submissions only when the same effective inputs and current tier have already been successfully evaluated under the current policy. Failed or interrupted evaluations remain retryable through the existing retry mechanism; a duplicate submission must not launch concurrent duplicate AI work. Preserve workspace isolation and snapshot history. Previous snapshots are used for change detection only, not as inference inputs. The AI assesses the latest validated snapshot and derived metrics only. Sparse inputs may lead to Undetermined; they must not prevent initiation of an otherwise valid new evaluation.
+
+Compute the following business indicators deterministically and provide them as assessment context, not execution gates:
+- Annualized GBV or current employee count indicates a potential mismatch with Section 1 tier eligibility, subject to the observation-duration requirement. Missing inputs are unknown, not below threshold.
+- Travel spend, company size or product adoption trend is increasing or decreasing.
 - Monthly support rate is at least 5 requests per 100 active users.
 
-A first snapshot can trigger evaluation without a previous recorded threshold crossing. Skip triggers with unavailable inputs. If no trigger is assessable, report insufficient data. If assessable but none fires, report no material trigger and retain the current tier without running AI re-evaluation. The demo checks these triggers on manual submission. Monthly growth percentages and persistence cannot be verified from summary inputs.
+Unavailable indicators remain unknown. No active indicators does not prevent an evaluation. Monthly growth percentages and persistence cannot be verified from summary inputs. Explain adoption above 100% as a ratio of historical average active users to current employee count when relevant.
 
-No material trigger means none of the assessable triggers fired; identify skipped triggers and missing inputs. Explain adoption above 100% as a ratio of historical average active users to current employee count.
+For an unchanged submission with a completed equivalent evaluation, report briefly that the activity is unchanged and no new evaluation was needed. Do not present this as a new Retain recommendation. For new evaluations, apply Sections 6.3–6.5 and the concise presentation rules in Section 5.4, without displaying internal gate diagnostics by default.
 
 6.3. Recommendation Rules
 
@@ -358,7 +369,7 @@ No material trigger means none of the assessable triggers fired; identify skippe
 
 Average bookings provide context about activity volume, not booking growth. Qualitative trends alone do not establish tier eligibility. Consider combined observations, existing eligibility criteria and expected business impact. Do not recommend a tier change when the supporting evidence is insufficient.
 
-The backend establishes permissible upgrade and downgrade targets and qualifying observations from the latest snapshot. If known headcount establishes Tier 2 while GBV leaves Tier 1 unverified, Tier 2 may be recommended and the remaining uncertainty documented. Use at least Medium confidence, sufficient observation duration and relevant qualifying evidence. A trigger alone does not establish a justified change.
+The backend establishes permissible upgrade and downgrade targets and qualifying observations from the latest snapshot. If known headcount establishes Tier 2 while GBV leaves Tier 1 unverified, Tier 2 may be recommended and the remaining uncertainty documented. Use at least Medium confidence, sufficient observation duration and relevant qualifying evidence. Neither a new submission nor an active business indicator alone establishes a justified tier change.
 
 Customer downgrade: after at least three completed months, recommend the highest tier established by the latest snapshot if it is lower than the current tier and confidence is at least Medium. Tier 1 to Tier 2 requires known annualized GBV below $500K and evidence satisfying Tier 2 eligibility (annualized GBV at least $100K or current headcount at least 150). Downgrade to Tier 3 requires known annualized GBV below $100K and known current headcount below 150. Missing inputs must not be interpreted as below threshold. Do not require an adoption threshold, stable adoption or any adoption measurement. Material uncertainty in eligibility or snapshot reliability prevents actionable change. Support needs and adoption may inform separate follow-ups. Every downgrade requires explicit human approval.
 
@@ -366,7 +377,7 @@ Customer downgrade: after at least three completed months, recommend the highest
 
 - High: not assigned from summary snapshots alone in the demo because monthly stability and sustained trends cannot be independently assessed.
 - Medium: at least three completed months with sufficient, coherent reported measurements supporting the recommendation.
-- Low: shorter observation, sparse data, low activity volume or meaningful uncertainty despite some supporting evidence.
+- Low: shorter observation, sparse data or meaningful uncertainty despite some supporting evidence. Low or zero activity volume alone does not reduce confidence when coherent measurements over sufficient duration support the conclusion, including a downgrade.
 - Insufficient: evidence needed for the specific recommendation is unavailable.
 
 Assess confidence in the specific recommendation, not customer tenure alone. Report material gaps and inconsistencies. User-reported trends do not establish verified persistence. Low or insufficient confidence prevents a tier change; use Retain only where retaining is supported, otherwise Undetermined with material follow-up.
@@ -380,7 +391,7 @@ All additional numerical thresholds are initial demo heuristics subject to valid
 
 7. Validation and Recovery
 
-Hard validation: enforce structural integrity, workspace boundaries, provenance integrity, permissible targets and actionable decision requirements. Reject final defects that cannot be safely isolated or corrected.
+Hard validation: enforce structural integrity, workspace boundaries, provenance integrity and stage-specific actionable decision requirements. For lead recommendations validate forecast-based suitability under Section 5 without imposing numerical eligibility targets; for customer recommendations enforce Section 6 quantitative eligibility and permissible targets. Both require at least Medium recommendation confidence for changes and explicit human approval. Reject final defects that cannot be safely isolated or corrected.
 
 Soft validation: retain warnings, information gaps and uncertainty for incomplete, weak, outdated or conflicting evidence. These must not independently terminate an otherwise usable evaluation.
 

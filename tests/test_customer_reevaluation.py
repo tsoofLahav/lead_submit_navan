@@ -71,19 +71,23 @@ def counts(sessions):
     (replace(EMPTY, travel_spend_trend="stable"), GateStatus.NO_TRIGGER),
     (EMPTY, GateStatus.INSUFFICIENT_DATA),
 ])
-def test_gate_only_saves_activity_without_reading_policy_or_calling_ai(sessions, workspace_ids, activity, status):
+def test_first_valid_submission_evaluates_even_without_business_indicators(sessions, workspace_ids, activity, status):
+    store_reference_data(sessions)
     owner, _ = workspace_ids
-    client, requests = mock_client()
-    events = []
-    result = Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(owner, activity, on_progress=events.append)
-    assert result.gate.status == status
-    assert result.gate.explanation and result.gate.information_gaps
-    assert not result.approval_available and result.predictions is None and result.evaluation_id is None
-    assert counts(sessions) == (1, 1, 0, 0) and not requests
-    assert [e.kind for e in events] == [
-        ProgressKind.CUSTOMER_REGISTERED, ProgressKind.CUSTOMER_ACTIVITY_PERSISTED, ProgressKind.REEVALUATION_GATE_ASSESSED,
-    ]
-    assert events[-1].gate_status == status
+    client, requests = mock_client(*uncertain_responses())
+    result = Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(owner, activity)
+    assert result.gate.status == status and not result.gate.triggered_conditions
+    assert result.recommendation.outcome == "undetermined" and not result.approval_available
+    assert counts(sessions) == (1, 1, 1, 0) and len(requests) == 2
+    inputs = json.loads(requests[0]["input"][1]["content"])
+    assert inputs["trigger_results"]["business_indicators"] == []
+    assert "status" not in inputs["trigger_results"]
+
+
+def uncertain_responses():
+    observed = {**assessment("insufficient"), "findings": [], "information_gaps": ["Eligibility is unknown."]}
+    decision = {**recommendation("undetermined", None, "insufficient"), "supporting_evidence": []}
+    return response(observed), response(decision)
 
 
 @pytest.mark.parametrize("decision", ["accept", "reject"])
@@ -135,7 +139,7 @@ def test_upgrade_context_persistence_and_human_decision(sessions, workspace_ids,
         data = json.loads(content)
         assert data["validated_product_data"]["company_name"] == UPGRADE.company_name
         assert Decimal(data["derived_metrics"]["annualized_gbv"]) == Decimal("720000")
-        assert "potential_tier_mismatch" in data["trigger_results"]["triggered_conditions"]
+        assert "potential_tier_mismatch" in data["trigger_results"]["business_indicators"]
     assert "Reserve the recommendation outcome" in requests[0]["input"][0]["content"]
     assert json.loads(requests[1]["input"][1]["content"])["allowed_supporting_evidence"] == ["annualized_gbv", "employee_count"]
     with sessions() as session:
@@ -316,3 +320,53 @@ def test_final_blocked_downgrade_is_not_retain(changes, confidence, uncertain):
         validate_recommendation(RecommendationOutput(**proposal), **context)
     proposal.update(outcome="undetermined", recommended_tier=None)
     validate_recommendation(RecommendationOutput(**proposal), **context)
+
+
+def test_activity_changes_compare_latest_normalized_values_and_policy(sessions, workspace_ids):
+    store_reference_data(sessions)
+    owner, _ = workspace_ids
+    client, requests = mock_client(*(uncertain_responses() * 5))
+    workflow = Orchestrator(sessions, ai_client=client)
+    first = workflow.submit_customer_reevaluation(owner, EMPTY)
+    with_bookings = replace(EMPTY, avg_monthly_bookings=Decimal("1.00"))
+    second = workflow.submit_customer_reevaluation(owner, with_bookings)
+    equivalent = workflow.submit_customer_reevaluation(owner, replace(with_bookings, avg_monthly_bookings=Decimal(1)))
+    assert equivalent.unchanged and equivalent.activity_id == second.activity_id
+    assert not second.gate.triggered_conditions
+    third = workflow.submit_customer_reevaluation(owner, EMPTY)
+    changed_tier = replace(EMPTY, current_tier=2)
+    fourth = workflow.submit_customer_reevaluation(owner, changed_tier)
+    with sessions.begin() as session:
+        session.get(BusinessPolicy, 1).content += "\nNew policy revision."
+    fifth = workflow.submit_customer_reevaluation(owner, changed_tier)
+    assert len({item.activity_id for item in (first, second, third, fourth, fifth)}) == 5
+    assert len(requests) == 10
+    assert "1.00" not in requests[4]["input"][1]["content"]
+    assert counts(sessions) == (1, 5, 5, 0)
+
+
+def test_failed_sparse_activity_can_retry(sessions, workspace_ids):
+    store_reference_data(sessions)
+    owner, _ = workspace_ids
+    client, requests = mock_client(500, *uncertain_responses())
+    workflow = Orchestrator(sessions, ai_client=client)
+    with pytest.raises(CustomerWorkflowFailure) as failed:
+        workflow.submit_customer_reevaluation(owner, EMPTY)
+    retry = workflow.retry_customer_reevaluation(owner, failed.value.activity_id)
+    assert retry.recommendation.outcome == "undetermined"
+    assert counts(sessions) == (1, 1, 1, 0) and len(requests) == 3
+
+
+def test_concurrent_activity_is_blocked_before_any_ai_request(engine):
+    from uuid import uuid4
+    from sqlalchemy.orm import sessionmaker
+
+    factory = sessionmaker(engine)
+    workflow = Orchestrator(factory)
+    workspace_id = uuid4()
+    with factory.begin() as competing:
+        workflow._lock_customer_evaluation(competing, workspace_id, EMPTY.company_name)
+        client, requests = mock_client()
+        with pytest.raises(CustomerWorkflowFailure, match="activity_evaluation_in_progress"):
+            Orchestrator(factory, ai_client=client).submit_customer_reevaluation(workspace_id, EMPTY)
+        assert not requests

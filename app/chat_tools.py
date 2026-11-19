@@ -98,7 +98,7 @@ def _history_record(company: Company, row) -> dict:
         return {
             **value, "evaluation_type": row.evaluation_type, "research_id": row.research_id,
             "current_tier": row.current_tier, "recommended_tier": row.recommended_tier,
-            "predictions": row.predictions, "confidence": row.confidence, "rationale": row.rationale,
+            "predictions": {key: value for key, value in row.predictions.items() if key != "policy_sha256"}, "confidence": row.confidence, "rationale": row.rationale,
             "information_gaps": row.information_gaps, "follow_up_actions": row.follow_up_actions,
             "decision_status": row.decision_status, "decided_at": row.decided_at,
         }

@@ -144,6 +144,13 @@ class RecommendationOutput(StructuredOutput):
     information_gaps: list[str]
 
 
+class LeadRecommendationOutput(RecommendationOutput):
+    material_suitability_uncertainty: bool = Field(
+        description="True if unresolved evidence materially undermines the proposed support-model fit. "
+        "Uncertain future GBV alone does not count."
+    )
+
+
 def evaluation_output_fields(
     assessment: LeadPredictionOutput | ProductAssessmentOutput,
     recommendation: RecommendationOutput,
@@ -230,4 +237,5 @@ class ComputedLeadPredictionOutput(LeadPredictionOutput):
 
 
 class ComputedRecommendation(RecommendationOutput):
+    material_suitability_uncertainty: bool | None = None
     tier_alignment: Literal["consistent", "potential_underclassification", "potential_overclassification", "undetermined"] | None

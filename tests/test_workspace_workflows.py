@@ -51,6 +51,7 @@ def record_evaluation(sessions, company_id, current=3, recommended=2, **kwargs):
     with sessions.begin() as session:
         evaluation = Evaluation(
             company_id=company_id, evaluation_type="lead_submit", predictions={},
+            created_at=kwargs.pop("created_at", func.clock_timestamp()),
             current_tier=current, recommended_tier=recommended, confidence="high",
             rationale="Isolated test recommendation.", **kwargs,
         )

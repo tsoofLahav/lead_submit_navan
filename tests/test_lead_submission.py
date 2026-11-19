@@ -75,7 +75,7 @@ def prediction_data(*, mixed=False):
 
 def decision_data(outcome="undetermined", tier=None, confidence="insufficient"):
     return {
-        "outcome": outcome, "recommended_tier": tier, "confidence": confidence,
+        "outcome": outcome, "recommended_tier": tier, "confidence": confidence, "material_suitability_uncertainty": False,
         "key_findings": ["Evidence considered."], "supporting_evidence": ["travel_spend_potential", "submitted_annual_gbv"] if outcome == "upgrade" else [],
         "rationale": "Qualitative research informs the assessment.",
         "follow_up_actions": ["Follow up on evidence gaps."], "information_gaps": ["More observation needed."],
@@ -122,7 +122,7 @@ def test_complete_lead_with_missing_research_and_progress(sessions, workspace_id
         ProgressKind.RECOMMENDATION_COMPLETED, ProgressKind.EVALUATION_COMPLETED,
     ]
     assert [request["text"]["format"]["name"] for request in requests] == [
-        "ScopedResearchOutput", "LeadAssessmentOutput", "RecommendationOutput",
+        "ScopedResearchOutput", "LeadAssessmentOutput", "LeadRecommendationOutput",
     ]
     for request in requests:
         assert request["input"][0]["content"].count(POLICY) == 1
@@ -182,7 +182,7 @@ def test_scope_retry_and_actionable_human_approval(sessions, workspace_ids):
         500, response(research_data(mixed=True), research=True), response(prediction_data(mixed=True)),
         response(decision_data("upgrade", 1, "high")),
         response(research_data(), research=True), response(prediction_data()),
-        response(decision_data("retain", 2, "low")),
+        response(decision_data()),
     )
     orchestrator = Orchestrator(sessions, ai_client=client)
     with pytest.raises(LeadWorkflowFailure) as initial:
@@ -247,7 +247,7 @@ def test_workflow_corrects_only_failed_stage_with_tools_disabled(sessions, works
     owner, _ = workspace_ids
     research = research_data(mixed=True)
     prediction = prediction_data(mixed=True)
-    valid_decision = decision_data("retain", 2, "low")
+    valid_decision = decision_data()
     if failed_component == "research":
         invalid = research_data(mixed=True)
         size = next(row for row in invalid["signals"] if row["signal"] == Signal.COMPANY_SIZE)
@@ -284,3 +284,38 @@ def test_workflow_corrects_only_failed_stage_with_tools_disabled(sessions, works
     assert execution.correction.initial_diagnostic.rule_id == expected_rule
     assert execution.correction.duration_seconds >= 0
     assert execution.request_rounds == 2
+
+
+def test_v3_medium_forecast_upgrade_and_approval_below_quantitative_threshold(sessions, workspace_ids):
+    owner, _ = workspace_ids
+    lead = LeadInput("Acme", "example.com", Decimal("50000"), 150)
+    observed = research_data(mixed=True)
+    complexity = next(row for row in observed["signals"] if row["signal"] == Signal.COMPLEXITY)
+    complexity.update(status="found", information_gap=None, evidence=[scoped_evidence(
+        "Multi-region rollout coordination",
+        sources=[{"url": "https://example.com/rollout", "title": None, "publication_date": None}],
+    )])
+    predicted = prediction_data(mixed=True)
+    predicted["expected_support_needs"] = {
+        **UNKNOWN, "level": "high", "confidence": "medium", "supporting_signals": [Signal.COMPLEXITY],
+    }
+    proposed = decision_data("upgrade", 1, "medium")
+    proposed["supporting_evidence"] = ["travel_spend_potential", "expected_support_needs"]
+    client, _ = mock_client(response(observed, research=True), response(predicted), response(proposed))
+    result = Orchestrator(sessions, ai_client=client).submit_lead(owner, lead)
+    assert result.current_tier == 2 and result.recommendation.recommended_tier == 1
+    assert result.recommendation.confidence == "medium" and result.approval_available
+    assert HumanApproval(sessions).accept(owner, result.evaluation_id).current_tier == 1
+
+
+def test_v3_actionable_lead_change_rejects_unsupported_forecast(sessions, workspace_ids):
+    owner, _ = workspace_ids
+    proposal = decision_data("upgrade", 1, "medium")
+    proposal["supporting_evidence"] = ["submitted_annual_gbv"]
+    client, requests = mock_client(
+        response(research_data(), research=True), response(prediction_data()), response(proposal), response(proposal),
+    )
+    with pytest.raises(LeadWorkflowFailure) as failure:
+        Orchestrator(sessions, ai_client=client).submit_lead(owner, LEAD)
+    assert failure.value.executions[-1].validation_diagnostic.rule_id == "recommendation.eligibility"
+    assert counts(sessions) == (1, 1, 0) and len(requests) == 4

@@ -96,7 +96,7 @@ def _workflow_retryable(stage, reason):
     return (
         stage in {"context", "research", "research_persistence", "prediction", "recommendation"}
         and not str(reason).startswith("stale_")
-        and reason not in {"evaluation_already_completed", "activity_not_triggered", "lead_not_found", "activity_not_found"}
+        and reason not in {"evaluation_already_completed", "activity_evaluation_in_progress", "lead_not_found", "activity_not_found"}
     )
 
 
@@ -113,7 +113,9 @@ def _error(error):
     if isinstance(error, (LeadWorkflowFailure, CustomerWorkflowFailure)):
         if error.reason == "CompanyConflict":
             return {"code": "company_conflict", "message": "The company name and domain conflict with an existing company."}, 409
-        stale = error.reason.startswith("stale_") or error.reason in {"evaluation_already_completed", "activity_not_triggered"}
+        if error.reason == "activity_evaluation_in_progress":
+            return {"code": "busy", "message": "An activity evaluation for this company is already running."}, 409
+        stale = error.reason.startswith("stale_") or error.reason in {"evaluation_already_completed"}
         info = {"code": "stale_workflow" if stale else "workflow_failed",
                 "message": "The saved evaluation context is no longer current." if stale else
                 "The evaluation stopped. Any saved company or customer activity was preserved."}
@@ -343,22 +345,14 @@ def leads(conversation_id):
 
 @api.post("/conversations/<uuid:conversation_id>/customer-activity")
 def activity(conversation_id):
-    required_amounts = {
-        "total_gbv": "Total GBV since signup (USD)",
-        "avg_monthly_bookings": "Average monthly bookings",
-    }
-    optional_amounts = ("avg_monthly_active_users", "avg_monthly_support_requests")
+    amounts = ("total_gbv", "avg_monthly_bookings", "avg_monthly_active_users", "avg_monthly_support_requests")
     trends = ("travel_spend_trend", "company_size_trend", "product_adoption_trend")
-    data = _body(("company_name", "company_domain", "current_tier", "months_since_signup", "employee_count", *required_amounts, *optional_amounts, *trends))
-    for key, label in required_amounts.items():
-        if data.get(key) is None or data[key] == "":
-            raise RequestError(f"{label} is required.")
+    data = _body(("company_name", "company_domain", "current_tier", "months_since_signup", "employee_count", *amounts, *trends))
     snapshot = validate_activity(CustomerActivityInput(
         *_company(data), _integer(data.get("current_tier"), "Current tier"),
         _integer(data.get("months_since_signup"), "Months since signup"),
         employee_count=_integer(data.get("employee_count"), "Employee count", optional=True),
-        **{key: _amount(data[key], label) for key, label in required_amounts.items()},
-        **{key: _amount(data.get(key), key.replace("_", " "), optional=True) for key in optional_amounts},
+        **{key: _amount(data.get(key), key.replace("_", " "), optional=True) for key in amounts},
         **{key: data.get(key, "unknown") for key in trends},
     ))
     assistant, workspace_id = _assistant(), g.workspace_id

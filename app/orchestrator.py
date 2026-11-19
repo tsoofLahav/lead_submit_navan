@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -6,13 +7,14 @@ from types import MappingProxyType
 from typing import cast
 from uuid import UUID
 
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .ai.budget import EvaluationBudget
 from .ai.client import AIClient, AIExecutionError, ExecutionMetadata
 from .ai.config import AIConfigurationError, Component
-from .ai.diagnostics import current_evaluation, enter_stage, observe_evaluation
+from .ai.diagnostics import current_evaluation, digest, enter_stage, observe_evaluation
 from .ai.engines import DecisionEngine, PredictionEngine, ResearchEngine
 from .ai.progress import ProgressCallback, ProgressEvent, ProgressKind
 from .ai.prompts import PromptRenderError, PromptRenderer, Task
@@ -22,9 +24,9 @@ from .data_access import CompanyConflict, WorkspaceData
 from .human_approval import HumanApproval
 from .models import Company, CompanyResearch, Evaluation, ProductActivity, TierChange
 from .reevaluation_gate import GateStatus, ReevaluationGate, TriggerResult
-from .reference_data import BusinessPolicyNotFound, PromptNotFound, get_prompt
+from .reference_data import BusinessPolicyNotFound, PromptNotFound, get_business_policy, get_prompt
 from .tier_eligibility import initial_tier
-from .validation import CustomerActivityInput, LeadInput, ValidationError, validate_activity, validate_lead
+from .validation import CustomerActivityInput, LeadInput, ValidationError, company_name_key, validate_activity, validate_lead
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class CustomerActivityResult:
     external_tier_changed: bool
     superseded_count: int
     gate: TriggerResult
+    unchanged: bool = False
 
 
 class LeadStage(StrEnum):
@@ -112,6 +115,7 @@ class CustomerReevaluationResult:
     evaluation_id: UUID | None = None
     approval_available: bool = False
     executions: tuple[ExecutionMetadata, ...] = ()
+    unchanged: bool = False
 
 
 class CustomerWorkflowFailure(RuntimeError):
@@ -289,6 +293,7 @@ class Orchestrator:
                 current_tier, is_customer = company.current_tier, company.is_customer
                 evaluation = Evaluation(
                     company_id=company_id, research_id=research_id, evaluation_type="lead_submit",
+                    created_at=func.clock_timestamp(),
                     current_tier=recorded_tier, decision_status="pending" if actionable else "not_applicable",
                     **evaluation_output_fields(predictions, recommendation),
                 )
@@ -316,9 +321,10 @@ class Orchestrator:
                 exception_type=type(error).__name__,
             ) from None
 
-    def _ai_context(self, client: AIClient, system_key: str, *tasks: Task) -> tuple[str, PromptRenderer]:
+    def _ai_context(self, client: AIClient, system_key: str, *tasks: Task, policy: str | None = None) -> tuple[str, PromptRenderer]:
         with self.reference_sessions() as session:
-            policy = PromptRenderer(session, client.tools).load_policy()
+            if policy is None:
+                policy = get_business_policy(session)
             templates = MappingProxyType({key: get_prompt(session, key) for key in (system_key, *tasks)})
         return policy, PromptRenderer(None, client.tools, templates=templates)
 
@@ -327,27 +333,42 @@ class Orchestrator:
         self, workspace_id: UUID, activity: CustomerActivityInput, *, on_progress: ProgressCallback | None = None,
         correlation_id: str | None = None,
     ) -> CustomerReevaluationResult:
-        """Save customer activity and run AI only if the existing gate triggers."""
+        """Evaluate new or changed activity under the current policy."""
         start = monotonic()
         enter_stage(CustomerStage.ACTIVITY_PERSISTENCE)
         try:
-            saved = self.submit_customer_activity(workspace_id, activity)
-        except (ValidationError, CompanyConflict, SQLAlchemyError) as error:
+            activity = validate_activity(activity)
+            with self._customer_evaluation_lock(workspace_id, activity.company_name):
+                try:
+                    with self.reference_sessions() as session:
+                        policy = get_business_policy(session)
+                except (BusinessPolicyNotFound, SQLAlchemyError) as error:
+                    saved = self.submit_customer_activity(workspace_id, activity)
+                    self._emit(on_progress, ProgressKind.EVALUATION_FAILED, stage=CustomerStage.CONTEXT)
+                    raise CustomerWorkflowFailure(
+                        CustomerStage.CONTEXT, type(error).__name__, saved.company_id, saved.activity_id,
+                        (), monotonic() - start, saved.gate, exception_type=type(error).__name__,
+                    ) from None
+                saved = self.submit_customer_activity(workspace_id, activity, policy_sha256=digest(policy))
+                if saved.unchanged:
+                    return CustomerReevaluationResult(
+                        saved.company_id, saved.activity_id, activity, saved.gate, monotonic() - start,
+                        unchanged=True,
+                    )
+                self._emit(on_progress, ProgressKind.CUSTOMER_REGISTERED if saved.created else ProgressKind.CUSTOMER_UPDATED)
+                self._emit(on_progress, ProgressKind.CUSTOMER_ACTIVITY_PERSISTED)
+                self._emit(on_progress, ProgressKind.REEVALUATION_GATE_ASSESSED, gate_status=saved.gate.status)
+                return self._evaluate_customer(
+                    workspace_id, saved.activity_id, start, on_progress, saved=saved,
+                    submitted_tier=activity.current_tier, policy=policy,
+                )
+        except (ValidationError, CompanyConflict, SQLAlchemyError, BusinessPolicyNotFound, _CustomerStateError) as error:
             stage = CustomerStage.ACTIVITY_PERSISTENCE
             self._emit(on_progress, ProgressKind.EVALUATION_FAILED, stage=stage)
+            reason = str(error) if isinstance(error, _CustomerStateError) else type(error).__name__
             raise CustomerWorkflowFailure(
-                stage, type(error).__name__, None, None, (), monotonic() - start,
-                exception_type=type(error).__name__,
+                stage, reason, None, None, (), monotonic() - start, exception_type=type(error).__name__,
             ) from None
-        self._emit(on_progress, ProgressKind.CUSTOMER_REGISTERED if saved.created else ProgressKind.CUSTOMER_UPDATED)
-        self._emit(on_progress, ProgressKind.CUSTOMER_ACTIVITY_PERSISTED)
-        self._emit(on_progress, ProgressKind.REEVALUATION_GATE_ASSESSED, gate_status=saved.gate.status)
-        if saved.gate.status != GateStatus.TRIGGERED:
-            return CustomerReevaluationResult(
-                saved.company_id, saved.activity_id, validate_activity(activity), saved.gate, monotonic() - start,
-            )
-        return self._evaluate_customer(workspace_id, saved.activity_id, start, on_progress, saved=saved,
-                                       submitted_tier=activity.current_tier)
 
     @observe_evaluation("customer", retry=True)
     def retry_customer_reevaluation(
@@ -355,7 +376,41 @@ class Orchestrator:
         correlation_id: str | None = None,
     ) -> CustomerReevaluationResult:
         """Restart AI against a still-current saved snapshot without resubmitting it."""
-        return self._evaluate_customer(workspace_id, activity_id, monotonic(), on_progress)
+        start = monotonic()
+        with self.sessions() as session:
+            data = WorkspaceData(session, workspace_id)
+            snapshot = data.get_company_record(ProductActivity, activity_id)
+            company = data.get_company(snapshot.company_id) if snapshot is not None else None
+            company_key = (company.id, company.name) if company is not None else None
+        if company_key is None:
+            return self._evaluate_customer(workspace_id, activity_id, start, on_progress)
+        company_id, name = company_key
+        try:
+            with self._customer_evaluation_lock(workspace_id, name):
+                return self._evaluate_customer(workspace_id, activity_id, start, on_progress)
+        except _CustomerStateError as error:
+            raise CustomerWorkflowFailure(
+                CustomerStage.CONTEXT, str(error), company_id, activity_id, (), monotonic() - start,
+            ) from None
+
+    @contextmanager
+    def _customer_evaluation_lock(self, workspace_id: UUID, name: str):
+        failure = None
+        with self.sessions.begin() as lock_session:
+            self._lock_customer_evaluation(lock_session, workspace_id, name)
+            try:
+                yield
+            except CustomerWorkflowFailure as error:
+                # Workflow failures must leave the already-saved snapshot retryable.
+                failure = error
+        if failure is not None:
+            raise failure
+
+    @staticmethod
+    def _lock_customer_evaluation(session: Session, workspace_id: UUID, name: str) -> None:
+        key = f"customer-evaluation:{workspace_id}:{company_name_key(name)}"
+        if not session.scalar(select(func.pg_try_advisory_xact_lock(func.hashtextextended(key, 0)))):
+            raise _CustomerStateError("activity_evaluation_in_progress")
 
     @staticmethod
     def _check_customer_snapshot(data: WorkspaceData, snapshot: ProductActivity) -> None:
@@ -369,7 +424,7 @@ class Orchestrator:
 
     def _evaluate_customer(
         self, workspace_id: UUID, activity_id: UUID, start: float, on_progress: ProgressCallback | None,
-        *, saved: CustomerActivityResult | None = None, submitted_tier: int | None = None,
+        *, saved: CustomerActivityResult | None = None, submitted_tier: int | None = None, policy: str | None = None,
     ) -> CustomerReevaluationResult:
         stage = CustomerStage.CONTEXT
         enter_stage(stage)
@@ -401,8 +456,6 @@ class Orchestrator:
             if gate is None:
                 gate = ReevaluationGate.assess(activity)
                 self._emit(on_progress, ProgressKind.REEVALUATION_GATE_ASSESSED, gate_status=gate.status)
-                if gate.status != GateStatus.TRIGGERED:
-                    raise _CustomerStateError("activity_not_triggered")
 
             client = self.ai_client if self.ai_client is not None else AIClient()
             budget = EvaluationBudget.from_env(start)
@@ -412,7 +465,7 @@ class Orchestrator:
                     "deadline_seconds": budget.deadline - start, "max_estimated_usd": budget.max_estimated_usd,
                 }
             policy, renderer = self._ai_context(
-                client, "reevaluation_system", Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION,
+                client, "reevaluation_system", Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION, policy=policy,
             )
             stage = CustomerStage.PREDICTION
             enter_stage(stage)
@@ -444,8 +497,10 @@ class Orchestrator:
                 self._check_customer_snapshot(data, snapshot)
                 output = evaluation_output_fields(predictions, recommendation)
                 output["predictions"]["activity_snapshot_id"] = str(activity_id)
+                output["predictions"]["policy_sha256"] = digest(policy)
                 evaluation = Evaluation(
                     company_id=company.id, research_id=None, evaluation_type="re_evaluation",
+                    created_at=func.clock_timestamp(),
                     current_tier=activity.current_tier, decision_status="pending" if actionable else "not_applicable",
                     **output,
                 )
@@ -474,7 +529,7 @@ class Orchestrator:
             ) from None
 
     def submit_customer_activity(
-        self, workspace_id: UUID, activity: CustomerActivityInput
+        self, workspace_id: UUID, activity: CustomerActivityInput, *, policy_sha256: str | None = None,
     ) -> CustomerActivityResult:
         activity = validate_activity(activity)
         gate = ReevaluationGate.assess(activity)
@@ -482,6 +537,22 @@ class Orchestrator:
             data = WorkspaceData(session, workspace_id)
             company = data.find_company(activity.company_name, activity.company_domain)
             created = company is None
+            values = asdict(activity)
+            for key in ("company_name", "company_domain", "current_tier"):
+                del values[key]
+            if policy_sha256 is not None and company is not None and company.current_tier == activity.current_tier:
+                latest, = data.company_records(ProductActivity, company.id, limit=1) or (None,)
+                if latest is not None and company.domain == activity.company_domain and all(
+                    getattr(latest, key) == value for key, value in values.items()
+                ):
+                    completed = session.scalar(select(Evaluation.id).where(
+                        Evaluation.company_id == company.id, Evaluation.evaluation_type == "re_evaluation",
+                        Evaluation.current_tier == activity.current_tier,
+                        Evaluation.predictions["activity_snapshot_id"].as_string() == str(latest.id),
+                        Evaluation.predictions["policy_sha256"].as_string() == policy_sha256,
+                    ).limit(1))
+                    if completed is not None:
+                        return CustomerActivityResult(company.id, latest.id, False, False, 0, gate, unchanged=True)
             tier_changed = False
             if created:
                 company = Company(
@@ -499,6 +570,7 @@ class Orchestrator:
                     session.add(
                         TierChange(
                             company_id=company.id,
+                            created_at=func.clock_timestamp(),
                             previous_tier=company.current_tier,
                             new_tier=activity.current_tier,
                         )
@@ -510,10 +582,7 @@ class Orchestrator:
                     company.employee_count = activity.employee_count
             data.flush_company_changes()
 
-            values = asdict(activity)
-            for key in ("company_name", "company_domain", "current_tier"):
-                del values[key]
-            snapshot = ProductActivity(company_id=company.id, **values)
+            snapshot = ProductActivity(company_id=company.id, created_at=func.clock_timestamp(), **values)
             session.add(snapshot)
             session.flush()
             superseded = HumanApproval.supersede_pending(data, company.id)

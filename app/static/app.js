@@ -104,17 +104,27 @@ function displayActivity(parent, body) {
   if (!body?.gate) return;
   const section = details(parent, "Customer activity and derived metrics");
   const metrics = body.gate.metrics || {};
-  items(section, [
-    "Gate: " + titleCase(body.gate.status),
-    "Indicative annualized GBV (USD): " + numeric(metrics.annualized_gbv),
-    "Estimated adoption: " + numeric(metrics.adoption_rate_percent, "%"),
-    "Monthly support requests per 100 active users: " + numeric(metrics.monthly_support_per_100_active_users),
-  ]);
   const submitted = body.submitted_activity || {};
-  items(section, Object.entries(submitted).filter(([key]) => !["company_name", "company_domain", "current_tier"].includes(key))
-    .map(([key, value]) => `${titleCase(key)}: ${key.endsWith("_trend") ? titleCase(value) : numeric(value)}`));
-  items(section, body.gate.triggered_conditions?.map(titleCase));
-  items(section, body.gate.information_gaps);
+  const inputs = [
+    ["months_since_signup", "Completed months"], ["total_gbv", "Total GBV (USD)"],
+    ["avg_monthly_bookings", "Average monthly bookings"], ["employee_count", "Current headcount"],
+    ["avg_monthly_active_users", "Average monthly active users"],
+    ["avg_monthly_support_requests", "Average monthly support requests"],
+    ["travel_spend_trend", "Travel spend trend"], ["company_size_trend", "Company size trend"],
+    ["product_adoption_trend", "Product adoption trend"],
+  ];
+  const derived = [
+    ["annualized_gbv", "Indicative annualized GBV (USD)", ""], ["adoption_rate_percent", "Estimated adoption", "%"],
+    ["monthly_support_per_100_active_users", "Monthly support requests per 100 active users", ""],
+  ];
+  items(section, inputs.filter(([key]) => submitted[key] != null && submitted[key] !== "unknown")
+    .map(([key, title]) => title + ": " + (key.endsWith("_trend") ? titleCase(submitted[key]) : numeric(submitted[key]))));
+  items(section, derived.filter(([key]) => metrics[key] != null)
+    .map(([key, title, unit]) => title + ": " + numeric(metrics[key], unit)));
+  if (Number(metrics.adoption_rate_percent) > 100) {
+    section.append(create("p", "Estimated adoption exceeds 100% because it compares historical active users with current headcount.", "muted"));
+  }
+
 }
 
 function evaluation(message, conversationId) {
@@ -133,7 +143,7 @@ function evaluation(message, conversationId) {
   );
 
   if (body.predictions || decision.supporting_evidence?.length) {
-    const section = details(card, "Predictions and evidence");
+    const section = create("div");
     const predictions = body.predictions || {};
     const leadPredictions = [
       ["travel_spend_potential", "Travel demand"], ["growth_potential", "Growth potential"],
@@ -142,7 +152,7 @@ function evaluation(message, conversationId) {
     for (const [key, title] of leadPredictions) {
       const prediction = predictions[key];
       if (!prediction) continue;
-      section.append(create("h4", `${title} · ${titleCase(prediction.level)} · ${label(prediction.confidence)} confidence`),
+      card.append(create("h4", `${title} · ${titleCase(prediction.level)} · ${label(prediction.confidence)} confidence`),
         create("p", prediction.rationale || ""));
       if (key === "travel_spend_potential" && prediction.admitted_weight != null && prediction.possible_weight != null) {
         section.append(create("p", `Supported travel weight: ${prediction.admitted_weight} of ${prediction.possible_weight}`, "muted"));
@@ -151,7 +161,7 @@ function evaluation(message, conversationId) {
       items(section, prediction.information_gaps);
     }
     if (predictions.findings) {
-      section.append(create("h4", `Activity assessment · ${titleCase(predictions.confidence)} confidence`),
+      card.append(create("h4", `Activity assessment · ${titleCase(predictions.confidence)} confidence`),
         create("p", predictions.rationale || ""));
       items(section, predictions.findings.map(row => `${(row.evidence || []).map(titleCase).join(", ")}. ${row.interpretation || ""}`));
       items(section, predictions.information_gaps);
@@ -161,6 +171,7 @@ function evaluation(message, conversationId) {
       items(section, decision.supporting_evidence.map(titleCase));
     }
     items(section, decision.key_findings);
+    if (section.childElementCount) details(card, "Supporting details").append(section);
   }
   if (body.research?.signals?.length) {
     const section = details(card, "Research findings and sources");
@@ -181,16 +192,18 @@ function evaluation(message, conversationId) {
       if (signal.information_gap) section.append(create("p", signal.information_gap, "muted"));
     }
   }
-  if (decision.information_gaps?.length || decision.follow_up_actions?.length) {
-    const section = details(card, "Information gaps and follow-up actions");
-    if (decision.information_gaps?.length) {
-      section.append(create("h4", "Information gaps"));
-      items(section, decision.information_gaps);
-    }
-    if (decision.follow_up_actions?.length) {
-      section.append(create("h4", "Follow-up actions"));
-      items(section, decision.follow_up_actions);
-    }
+  const uniqueSteps = new Map();
+  for (const item of [...(decision.follow_up_actions || []), ...(decision.information_gaps || [])]) {
+    const key = item.trim().toLowerCase().replace(/[.!?]+$/, "");
+    if (key && !uniqueSteps.has(key)) uniqueSteps.set(key, item);
+  }
+  const steps = [...uniqueSteps.values()];
+  if (steps.length) {
+    const next = create("section");
+    next.append(create("h4", "Next steps"));
+    items(next, steps.slice(0, 2));
+    card.insertBefore(next, card.querySelector("details"));
+    if (steps.length > 2) items(details(card, "More follow-ups and information gaps"), steps.slice(2));
   }
   displayActivity(card, body);
 
@@ -265,7 +278,7 @@ function drawThread(scroll = true) {
     }
     const bubble = markdown(message.content);
     const metadata = message.metadata || {};
-    if (metadata.kind === "activity_update") displayActivity(bubble, metadata.result);
+    if (metadata.kind === "activity_update" && !metadata.result?.unchanged) displayActivity(bubble, metadata.result);
     if (metadata.kind === "workflow_failure" && !messages.some(row => row.metadata?.retried_failure_id === message.id)
         && metadata.result?.can_retry && error?.retry?.message_id !== message.id) {
       const retry = create("button", "Retry evaluation");
@@ -361,7 +374,7 @@ const stageEvents = {
   customer_registered: ["customer", "Save customer details", "done"],
   customer_updated: ["customer", "Save customer details", "done"],
   customer_activity_persisted: ["activity", "Save customer activity", "done"],
-  reevaluation_gate_assessed: ["gate", "Check re-evaluation triggers", "done"],
+  reevaluation_gate_assessed: ["gate", "Review business indicators", "done"],
   research_started: ["research", "Research company", "running"],
   research_completed: ["research", "Research company", "done"],
   prediction_started: ["prediction", "Assess the evidence", "running"],
@@ -582,8 +595,8 @@ function openForm(type) {
   } else {
     fields.push(select("current_tier", "Current tier *", ["1", "2", "3"], true),
       field("months", "Months since signup", "number", { required: true, min: "1" }),
-      field("total_gbv", "Total GBV since signup (USD)", "number", { required: true, min: "0" }),
-      field("avg_monthly_bookings", "Average monthly bookings", "number", { required: true, min: "0" }),
+      field("total_gbv", "Total GBV since signup (USD)", "number", { min: "0" }),
+      field("avg_monthly_bookings", "Average monthly bookings", "number", { min: "0" }),
       field("employee_count", "Current employee count", "number", { min: "1" }),
       field("avg_monthly_active_users", "Average monthly active users", "number", { min: "0" }),
       field("avg_monthly_support_requests", "Average monthly support requests", "number", { min: "0" }));

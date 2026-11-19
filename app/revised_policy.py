@@ -212,7 +212,7 @@ def compute_predictions(
             {"signal": rating.signal, "index_count": len(rating.evidence_indices)},
         )
         rating_signals.add(rating.signal)
-        if not rating.material_uncertainty and any(_admissible(evidence[i]) for i in rating.evidence_indices):
+        if any(_admissible(evidence[i]) for i in rating.evidence_indices):
             admitted[rating.signal] = rating
     weight = sum(validation.TRAVEL_WEIGHTS[key] for key in admitted)
     weighted = sum(validation.TRAVEL_WEIGHTS[key] * item.rating for key, item in admitted.items())
@@ -241,7 +241,7 @@ def compute_predictions(
         travel_gaps.append("High confidence requires consistent evidence for both core travel signals.")
     travel_output = ComputedTravelPrediction(
         level=level, confidence=travel_confidence, supporting_signals=travel.supporting_signals,
-        rationale=travel.rationale if level != "unknown" else " ".join(travel_gaps or ["Travel potential is unknown."]),
+        rationale=travel.rationale if level != "unknown" else "The available evidence does not establish travel potential.",
         information_gaps=list(dict.fromkeys(travel_gaps)), company_scale=scale,
         intensity_ratings=[admitted[rating.signal] for rating in travel.intensity_ratings if rating.signal in admitted],
         admitted_weight=weight, possible_weight=sum(validation.TRAVEL_WEIGHTS.values()),
@@ -296,48 +296,44 @@ def tier_alignment(level: str, tier: int) -> str:
 
 
 def lead_targets(lead, tier: int, research: ScopedResearchOutput, predictions) -> dict[int, list[str]]:
+    """Forecast-supported tier options and the required basis for each option."""
     travel = predictions.travel_spend_potential
-    alignment = tier_alignment(travel.level, tier)
-    if travel.confidence != "high":
-        return {}
-    submitted = lead.employee_count
-    candidates = [(item, lower, upper) for item, lower, upper in _employee_candidates(research) if item.sources]
-    conclusions = {
-        None if item.approximation and lower == upper else
-        True if lower is not None and lower >= TIER_2_EMPLOYEES else
-        False if upper is not None and upper < TIER_2_EMPLOYEES else None
-        for item, lower, upper in candidates
+    growth = predictions.growth_potential
+    support = predictions.expected_support_needs
+    sufficient = {"medium", "high"}
+    basis = {
+        "low": (3,), "medium": (2,), "high": (1, 2), "very_high": (1,),
     }
-    research_qualifies = next(iter(conclusions)) if len(conclusions) == 1 else None
-    employee_key = "employee_count" if submitted is not None else None
-    # GBV independently settles the tier above both numerical thresholds.
-    if lead.submitted_annual_gbv >= TIER_1_GBV:
-        eligible, key = 1, "submitted_annual_gbv"
-    elif lead.submitted_annual_gbv >= TIER_2_GBV:
-        eligible, key = 2, "submitted_annual_gbv"
-    else:
-        if candidates and research_qualifies is None:
-            return {}  # The employee threshold is material to this recommendation.
-        if research_qualifies is not None:
-            if submitted is not None and (submitted >= TIER_2_EMPLOYEES) != research_qualifies:
-                if not any(
-                    item.reliability == "high" and item.evidence_type == "direct"
-                    and _iso_date(item.employee_bounds.as_of) and validation._nonempty(item.context)
-                    and item.employee_bounds.submitted_count_resolution == "verified_replacement"
-                    for item, _, _ in candidates
-                ):
-                    return {}
-            eligible, key = (2 if research_qualifies else 3), "company_size"
-        elif employee_key is not None:
-            eligible, key = (2 if submitted >= TIER_2_EMPLOYEES else 3), employee_key
-        else:
-            return {}
-    if (eligible < tier and alignment == "potential_underclassification") or (
-        eligible > tier and alignment == "potential_overclassification"
+    targets = {}
+    if travel.confidence in sufficient:
+        for target in basis.get(travel.level, ()):
+            targets[target] = ["travel_spend_potential"]
+
+    strong_growth = growth.level == "high" and growth.confidence in sufficient
+    strong_support = support.level == "high" and support.confidence in sufficient
+    refinements = []
+    if strong_growth:
+        refinements.append("growth_potential")
+    if strong_support:
+        refinements.append("expected_support_needs")
+    if targets and refinements:
+        refinements.sort(key=lambda key: getattr(predictions, key).confidence != "high")
+        next_higher_touch = min(targets) - 1
+        if next_higher_touch >= 1:
+            targets[next_higher_touch] = ["travel_spend_potential", refinements[0]]
+        if travel.level == "low" and len(refinements) == 2:
+            targets[1] = ["travel_spend_potential", *refinements]
+    elif travel.level == "unknown" and strong_growth and support.level in {"medium", "high"} and support.confidence in sufficient:
+        targets[1 if strong_support else 2] = ["growth_potential", "expected_support_needs"]
+
+    candidates = _employee_candidates(research)
+    if tier == 3 and candidates and all(
+        item.sources and lower is not None and lower >= TIER_2_EMPLOYEES
+        and not (item.approximation and lower == upper)
+        for item, lower, upper in candidates
     ):
-        keys = ["submitted_annual_gbv", key] if eligible == 3 and key != "submitted_annual_gbv" else [key]
-        return {eligible: keys}
-    return {}
+        targets.setdefault(2, ["company_size"])
+    return targets
 
 
 def customer_targets(activity, assessment) -> dict[int, list[str]]:

@@ -415,7 +415,7 @@ class ChatAssistant:
         name = result.company.company_name if lead else result.customer.company_name
         tier = result.current_tier if lead else result.customer.current_tier
         if recommendation is None:
-            text = f"{name}. {result.gate.explanation}"
+            text = f"{name}: Activity is unchanged. No new evaluation was needed."
         else:
             outcome = (f"{recommendation.outcome.capitalize()} Tier {recommendation.recommended_tier}"
                        if recommendation.recommended_tier is not None else "Recommendation undetermined")
@@ -428,6 +428,7 @@ class ChatAssistant:
             body.update(initial_tier=result.initial_tier, research_id=result.research_id, research=result.research)
         else:
             body["gate"] = result.gate
+            body["unchanged"] = result.unchanged
             body["submitted_activity"] = result.customer
         metadata = WorkflowMetadata(
             MessageKind.EVALUATION if result.evaluation_id is not None else MessageKind.ACTIVITY,

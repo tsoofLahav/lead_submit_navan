@@ -10,7 +10,7 @@ from app import revised_policy as policy, validation
 from app.ai.config import AISettings, Component
 from app.ai.prompts import PromptRenderer, Task
 from app.ai.schemas import (
-    ActivityEvidence, EmployeeBounds, EvidenceRating, LeadAssessmentOutput, Prediction, ProductAssessmentOutput, RecommendationOutput,
+    ActivityEvidence, EmployeeBounds, EvidenceRating, LeadAssessmentOutput, LeadRecommendationOutput, Prediction, ProductAssessmentOutput, RecommendationOutput,
     ResearchSource, ScopedResearchOutput, ScopedResearchSignal, ScopedSignalEvidence, Signal, TravelAssessment,
 )
 from app.ai.tools import ToolRegistry
@@ -149,10 +149,10 @@ def test_eligibility_requires_scoped_supported_bounds_and_preserves_input():
         proposed.travel_spend_potential.intensity_ratings[1].rating = 2
         return policy.lead_targets(LEAD, 3, data, policy.compute_predictions(proposed, data))
 
-    assert evaluate([evidence(220, lower=220, upper=220)]) == {2: ["company_size"]}
+    assert evaluate([evidence(220, lower=220, upper=220)]) == {1: ["travel_spend_potential"], 2: ["travel_spend_potential"]}
     assert evaluate([evidence("145–200", lower=145, upper=200)]) == {}
     assert evaluate([evidence(220, lower=220, upper=220, scope="unknown")]) == {}
-    assert evaluate([evidence(220, lower=220, upper=220, approximation=True)]) == {}
+    assert 2 in evaluate([evidence(220, lower=220, upper=220, approximation=True)])
     assert LEAD.employee_count is None
     activity = CustomerActivityInput("Demo", "demo.test", 3, 6, employee_count=220)
     assert policy.customer_targets(activity, None) == {2: ["employee_count"]}
@@ -229,8 +229,8 @@ def test_revised_research_eligibility_persists_pending_and_preserves_approval(se
     proposed = draft()
     for rating in proposed.travel_spend_potential.intensity_ratings:
         rating.rating = 2
-    decision = RecommendationOutput(
-        outcome="upgrade", recommended_tier=2, confidence="high", key_findings=["Scoped headcount qualifies"],
+    decision = LeadRecommendationOutput(
+        material_suitability_uncertainty=False, outcome="upgrade", recommended_tier=2, confidence="high", key_findings=["Scoped headcount qualifies"],
         supporting_evidence=["company_size", "travel_spend_potential"], rationale="Scoped records establish headcount.",
         follow_up_actions=[], information_gaps=[],
     )
@@ -242,7 +242,7 @@ def test_revised_research_eligibility_persists_pending_and_preserves_approval(se
     orchestrator = Orchestrator(sessions, ai_client=client)
     result = orchestrator.submit_lead(owner, LEAD)
     assert result.initial_tier == result.current_tier == 3 and result.approval_available
-    assert json.loads(requests[2]["input"][1]["content"])["permissible_targets"] == {"2": ["company_size"]}
+    assert json.loads(requests[2]["input"][1]["content"])["permissible_targets"] == {"1": ["travel_spend_potential"], "2": ["travel_spend_potential"]}
     with sessions() as session:
         assert session.get(Company, result.company_id).employee_count is None
         persisted = session.get(Evaluation, result.evaluation_id)

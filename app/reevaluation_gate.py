@@ -7,10 +7,7 @@ from .validation import CustomerActivityInput, TREND_FIELDS, validate_activity
 
 SUPPORT_TRIGGER_RATE = 5
 
-NO_TRIGGER_RESPONSE = (
-    "Customer activity has been successfully updated. No re-evaluation triggers were detected "
-    "based on the available information. The current tier remains unchanged."
-)
+NO_TRIGGER_RESPONSE = "No active business indicators were detected in this snapshot."
 
 
 class GateStatus(StrEnum):
@@ -38,7 +35,7 @@ class TriggerResult:
 class ReevaluationGate:
     @staticmethod
     def assess(activity: CustomerActivityInput) -> TriggerResult:
-        """Assess the submitted snapshot using active policy Sections 6.1 and 6.2."""
+        """Calculate metrics and contextual indicators, independently of evaluation initiation."""
         activity = validate_activity(activity)
         gaps = []
         triggered = []
@@ -90,16 +87,13 @@ class ReevaluationGate:
 
         if triggered:
             status = GateStatus.TRIGGERED
-            explanation = "Customer activity has been successfully updated. AI re-evaluation is required."
+            explanation = "The snapshot contains active business indicators."
         elif eligibility_assessable or known_trend or support is not None:
             status = GateStatus.NO_TRIGGER
             explanation = NO_TRIGGER_RESPONSE
         else:
             status = GateStatus.INSUFFICIENT_DATA
-            explanation = (
-                "Customer activity has been successfully updated. Re-evaluation eligibility could not be "
-                f"assessed. {' '.join(gaps)}"
-            )
+            explanation = "The available snapshot does not establish an active business indicator."
 
         return TriggerResult(
             status,

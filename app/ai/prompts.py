@@ -17,7 +17,7 @@ from ..validation import (
 from .diagnostics import digest
 from .config import AISettings, Component
 from .schemas import (
-    LeadAssessmentOutput, LeadPredictionOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput,
+    LeadAssessmentOutput, LeadPredictionOutput, LeadRecommendationOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput,
     ScopedResearchOutput,
 )
 from .tools import ToolRegistry, strict_schema
@@ -65,7 +65,7 @@ TASKS = {
         Component.DECISION, "lead_submit_system",
         {"company_profile": LeadInput, "current_tier": int, "validated_predictions": LeadPredictionOutput,
          "validated_research_findings": ResearchOutput},
-        "recommendation_schema", RecommendationOutput,
+        "recommendation_schema", LeadRecommendationOutput,
     ),
     Task.REEVALUATION_PREDICTION: TaskSpec(
         Component.PREDICTION, "reevaluation_system",
@@ -216,9 +216,10 @@ class PromptRenderer:
                 research_payload["sources"] = sources
             data["validated_research_findings"] = research_payload
         if task in (Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION):
-            trigger_data = asdict(gate)
-            del trigger_data["metrics"]
-            data["trigger_results"] = trigger_data
+            data["trigger_results"] = {
+                "business_indicators": gate.triggered_conditions,
+                "metric_caveats": gate.information_gaps,
+            }
 
         options = self.tools.request_options(spec.component, settings)
         system_slots = {

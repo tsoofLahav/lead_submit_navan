@@ -61,9 +61,7 @@ def verify_persistence(sessions, result):
         ):
             raise RuntimeError("Unexpected company, activity, or research persistence.")
         if result.evaluation_id is None:
-            if evaluations or result.executions:
-                raise RuntimeError("A gate-only scenario unexpectedly invoked AI or persisted an evaluation.")
-            return None
+            raise RuntimeError("The first valid snapshot must produce a completed evaluation.")
         evaluation, = evaluations
         if (
             evaluation.id != result.evaluation_id or evaluation.evaluation_type != "re_evaluation"
@@ -116,8 +114,8 @@ def main():
     if any(scenario not in SCENARIOS for scenario in scenarios):
         parser.error("Choose no_trigger, insufficient, upgrade, or retain.")
     app = create_app()
-    if any(EXPECTED_GATES[item] == GateStatus.TRIGGERED for item in scenarios) and not os.getenv("OPENAI_API_KEY"):
-        raise SystemExit("Set OPENAI_API_KEY to run the triggered scenarios.")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise SystemExit("Set OPENAI_API_KEY to run the live evaluation scenarios.")
     reference_engine = app.extensions["db_engine"]
     reference_engine.update_execution_options(postgresql_readonly=True)
     local_engine = open_local_database("REEVALUATION_SMOKE_DATABASE_URL", "navan_stage5_smoke")

@@ -328,23 +328,19 @@ progress events and a JSON report. Each invocation makes live OpenAI requests.
 From application code, call
 `Orchestrator(app.extensions["db_sessions"]).submit_customer_reevaluation(workspace_id, activity)`
 with a workspace ID resolved on the server and a `CustomerActivityInput`.
-The existing activity submission transaction registers or updates the
-customer, saves the submitted snapshot, records an external tier change when
-needed, and supersedes obsolete pending recommendations. It commits before
-any policy lookup or OpenAI request.
+The activity transaction saves a new snapshot, records an external tier
+change when needed, and supersedes obsolete pending recommendations. The
+first valid snapshot and changed snapshots always run a tool-free
+assessment and recommendation. Business indicators are context, including
+when none is active. Identical snapshots skip evaluation only when the
+latest snapshot already has a successful evaluation for the reported
+tier and current policy checksum. The no-op preserves pending decisions.
+A PostgreSQL advisory lock scoped to the workspace and company prevents
+overlapping customer submissions and retries from launching duplicate AI
+work. This holds one additional database connection per running evaluation.
 
-- `NO_TRIGGER` and `INSUFFICIENT_DATA` return a successful
-  `CustomerReevaluationResult` with the saved activity and deterministic gate
-  explanation. These outcomes use zero AI calls and create no evaluation.
-- `TRIGGERED` snapshots the policy and stored re-evaluation prompts, then
-  calls the existing prediction and decision engines with the latest
-  user-reported activity, derived metrics, trends, and gate findings.
-  Both requests have tools disabled. The evaluation commits only after
-  both responses pass validation, without changing the company tier.
-- A proposed upgrade remains pending until explicitly handled by
-  `HumanApproval`. Retain and undetermined outcomes use `not_applicable`.
-  Downgrade recommendations are intentionally disabled because policy
-  section 6.3 leaves sufficient adoption undefined.
+Upgrade and downgrade proposals are pending until explicit human approval.
+Retain and Undetermined do not change the tier.
 
 `CustomerWorkflowFailure` reports the failed stage, committed IDs, gate
 result, and safe execution diagnostics. Call
@@ -367,9 +363,9 @@ python -m pytest -q
 
 The live test writes synthetic records only to a dedicated local database.
 It reads the approved policy and prompts from `DATABASE_URL` in read-only
-mode for the two triggered scenarios. If the model produces an actionable
-upgrade, the runner explicitly accepts it in the local database and verifies
-the linked history record. Set `OPENAI_API_KEY` for the triggered scenarios.
+mode for all scenarios. If the model produces an actionable
+tier change, the runner explicitly accepts it in the local database and verifies
+the linked history record. Set `OPENAI_API_KEY` for these live scenarios.
 
 ```sh
 createdb navan_stage5_smoke
@@ -504,9 +500,9 @@ The browser shows a correction progress event without exposing diagnostics.
 Server logs and execution metadata record the initial rule, correction
 outcome, and added latency.
 
-## Final business policy
+## Final business policy V3
 
-The final 19 November 2026 policy and eight matching prompt seeds are in
+The final 19 November 2026 V3 policy and eight matching prompt seeds are in
 `seeds/business_prediction_policy.txt` and `seeds/prompts/`. Before deploying
 this implementation, ensure the active `business_policy` row and all eight
 `prompts` rows match these files. The workflows load the stored text directly.
@@ -514,13 +510,14 @@ The final six-signal outputs use the existing JSONB columns. Older research
 records may still show the earlier signals in history. No data cleanup or
 schema migration is required for the policy change.
 
-The backend computes travel scale, coverage, weighted intensity and eligible
-tier targets. One admitted core travel signal can support a provisional
-prediction. Customer downgrades require at least three completed months,
-known qualifying eligibility inputs and Medium confidence without material
-eligibility uncertainty. Adoption remains contextual. The Customer Activity form requires total GBV and
-average monthly bookings. Historical snapshots can still contain missing values. Both directions
-require explicit approval and the existing freshness checks.
+Initial lead assignment still uses submitted GBV and headcount. Subsequent
+lead recommendations use forecast-based suitability and may be actionable at
+Medium or High confidence. Customer changes still require quantitative
+eligibility and sufficient tenure and confidence. Both require explicit
+approval. V3 permits optional customer metrics, including GBV and average
+bookings, to be recorded as unknown. The latest snapshot ID and policy
+checksum are stored in the existing evaluation JSONB. A pre-V3 evaluation
+with no policy checksum does not suppress the next equivalent submission.
 
 Run the revised tests and optional live smoke cases with isolated local PostgreSQL:
 

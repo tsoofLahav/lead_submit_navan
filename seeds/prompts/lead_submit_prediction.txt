@@ -1,9 +1,9 @@
 1. Assess validated findings and their relevance to each prediction (§2, §3). Use no external research tools.
-2. Rate external business activity, geographic distribution and corporate events where supported (weights 2, 2, 1). Credible indirect evidence supports ratings without exact trip counts or traveler percentages. Supported scale and one admitted core signal permit a provisional estimate capped at Medium; High requires both core signals and the policy confidence conditions. Events alone are insufficient. Rate applicable travel signals and reference their exact supporting evidence indices (§3.1). Identify uncertainty that could change a rating. The backend computes scale, admitted coverage, weighted intensity and the matrix result. Do not produce your own travel level or weighted score.
+2. Rate external business activity, geographic distribution and corporate events where supported (weights 2, 2, 1). Credible indirect evidence supports ratings without exact trip counts or traveler percentages. Supported scale and one admitted core signal permit a provisional estimate capped at Medium; High requires both core signals and the policy confidence conditions. Events alone are insufficient. Rate applicable travel signals and reference their exact supporting evidence indices (§3.1). Choose the most plausible supported rating and represent meaningful uncertainty in confidence. Missing trip counts alone do not make an inference unsupported. The backend computes scale, admitted coverage, weighted intensity and the matrix result. Do not produce your own travel level or weighted score.
 3. Assess Growth Potential (§3.2) and Expected Support Needs (§3.3).
 4. Determine confidence and minimum evidence eligibility for each prediction (§4.2–4.3).
 5. Return each prediction, confidence, supporting signals, rationale and key information gaps (§3.4, §4.3) using the supplied schema. Preserve traceability to the supplied evidence.
-6. Follow §5.4: one or two concise sentences per prediction; prioritize strongest evidence and material uncertainty. Avoid repeating evidence in narrative fields.
+6. Follow §5.4: approximately 30 words or fewer per prediction; prioritize strongest evidence and material uncertainty. Avoid repeating evidence in narrative fields.
 
 Inputs: {{company_profile}}, {{validated_research_findings}}
 Output schema: {{prediction_schema}}

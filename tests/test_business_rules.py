@@ -108,7 +108,7 @@ def test_zero_and_unknown_values(activity):
     assert result.metrics.adoption_rate_percent == 0
     assert result.metrics.annualized_gbv is None
     assert result.metrics.monthly_support_per_100_active_users is None
-    assert "positive active-user count" in result.explanation
+    assert any("positive active-user count" in gap for gap in result.information_gaps)
 
 
 @pytest.mark.parametrize("field", ["travel_spend_trend", "company_size_trend", "product_adoption_trend"])
