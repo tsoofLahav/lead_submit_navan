@@ -54,7 +54,7 @@ def frames(response):
 
 def payload(name, **values):
     return {"company_name": name, "company_domain": f"{name.lower()}.test", "current_tier": 3,
-            "months_since_signup": 6, **values}
+            "months_since_signup": 6, "total_gbv": "0", "avg_monthly_bookings": "0", **values}
 
 
 def test_frontend_and_workspace_reload_security(web):
@@ -114,9 +114,16 @@ def test_gate_only_and_decimal_null_validation(web, sessions):
     path = thread(client)
     assert post(client, path + "/customer-activity", payload("Bad", current_tier=None)).status_code == 400
     assert post(client, path + "/customer-activity", payload("Bad", avg_monthly_bookings="invalid")).status_code == 400
+    for key, label in (("total_gbv", "Total GBV since signup (USD)"),
+                       ("avg_monthly_bookings", "Average monthly bookings")):
+        invalid = payload("Bad")
+        del invalid[key]
+        response = post(client, path + "/customer-activity", invalid)
+        assert response.status_code == 400
+        assert response.json["error"]["message"] == f"{label} is required."
     for name, values, status in [
-        ("Quiet", {"total_gbv": "0", "employee_count": 40, "avg_monthly_bookings": None}, "NO_TRIGGER"),
-        ("Sparse", {}, "INSUFFICIENT_DATA"),
+        ("Quiet", {"total_gbv": "0", "employee_count": 40}, "NO_TRIGGER"),
+        ("Sparse", {"months_since_signup": 2}, "INSUFFICIENT_DATA"),
     ]:
         events = frames(post(client, path + "/customer-activity", payload(name, **values)))
         assert events[-1][0] == "result"
@@ -128,8 +135,8 @@ def test_gate_only_and_decimal_null_validation(web, sessions):
         snapshots = {company.name: activity for company, activity in session.execute(
             select(Company, ProductActivity).join(ProductActivity, ProductActivity.company_id == Company.id),
         )}
-        assert snapshots["Quiet"].total_gbv == 0 and snapshots["Quiet"].avg_monthly_bookings is None
-        assert snapshots["Sparse"].total_gbv is None
+        assert snapshots["Quiet"].total_gbv == 0 and snapshots["Quiet"].avg_monthly_bookings == 0
+        assert snapshots["Sparse"].avg_monthly_active_users is None
         assert session.scalar(select(func.count(Evaluation.id))) == 0
 
 
@@ -371,3 +378,24 @@ def test_demo_company_copies_are_interactive_and_isolated(web, sessions, referen
         assert template.current_tier == other.current_tier == 3
         for model, expected in ((ProductActivity, 1), (Evaluation, 1), (TierChange, int(accept)), (CompanyResearch, 0)):
             assert session.scalar(select(func.count()).select_from(model).where(model.company_id == copy.id)) == expected
+
+
+
+def test_existing_workspace_gets_missing_demo_companies_on_list(web, sessions):
+    client = web.test_client()
+    assert client.get("/api/companies").json["companies"] == []
+    with client.session_transaction() as browser_session:
+        workspace = UUID(browser_session["workspace_id"])
+    with sessions.begin() as session:
+        existing = Company(workspace_id=workspace, name="Gradient Labs", domain="updated.test", current_tier=1)
+        session.add(existing)
+        session.add_all([
+            DemoCompany(name="Gradient Labs", domain="gradient.test", submitted_annual_gbv=100, current_tier=3),
+            DemoCompany(name="Valarian", domain="valarian.test", submitted_annual_gbv=100, current_tier=3),
+        ])
+        session.flush()
+        existing_id = str(existing.id)
+    companies = client.get("/api/companies").json["companies"]
+    assert {row["name"] for row in companies} == {"Gradient Labs", "Valarian"}
+    assert {"name": "Gradient Labs", "id": existing_id, "tier": 1} in companies
+    assert client.get("/api/companies").json["companies"] == companies

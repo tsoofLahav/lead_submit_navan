@@ -18,7 +18,7 @@ from .data_access import WorkspaceData
 from .human_approval import RecommendationConflict, RecommendationNotFound
 from .orchestrator import CustomerWorkflowFailure, LeadWorkflowFailure
 from .validation import CustomerActivityInput, LeadInput, ValidationError, validate_activity, validate_lead
-from .workspaces import resolve_workspace
+from .workspaces import resolve_workspace, seed_demo_companies
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -222,7 +222,8 @@ def conversation(conversation_id):
 
 @api.get("/companies")
 def companies():
-    with current_app.extensions["db_sessions"]() as session:
+    with current_app.extensions["db_sessions"].begin() as session:
+        seed_demo_companies(session, g.workspace_id)
         rows = WorkspaceData(session, g.workspace_id).company_list(101)
         return {"companies": [{"id": str(row.id), "name": row.name, "tier": row.current_tier} for row in rows[:100]],
                 "more": len(rows) > 100}
@@ -342,14 +343,22 @@ def leads(conversation_id):
 
 @api.post("/conversations/<uuid:conversation_id>/customer-activity")
 def activity(conversation_id):
-    amounts = ("total_gbv", "avg_monthly_bookings", "avg_monthly_active_users", "avg_monthly_support_requests")
+    required_amounts = {
+        "total_gbv": "Total GBV since signup (USD)",
+        "avg_monthly_bookings": "Average monthly bookings",
+    }
+    optional_amounts = ("avg_monthly_active_users", "avg_monthly_support_requests")
     trends = ("travel_spend_trend", "company_size_trend", "product_adoption_trend")
-    data = _body(("company_name", "company_domain", "current_tier", "months_since_signup", "employee_count", *amounts, *trends))
+    data = _body(("company_name", "company_domain", "current_tier", "months_since_signup", "employee_count", *required_amounts, *optional_amounts, *trends))
+    for key, label in required_amounts.items():
+        if data.get(key) is None or data[key] == "":
+            raise RequestError(f"{label} is required.")
     snapshot = validate_activity(CustomerActivityInput(
         *_company(data), _integer(data.get("current_tier"), "Current tier"),
         _integer(data.get("months_since_signup"), "Months since signup"),
         employee_count=_integer(data.get("employee_count"), "Employee count", optional=True),
-        **{key: _amount(data.get(key), key.replace("_", " "), optional=True) for key in amounts},
+        **{key: _amount(data[key], label) for key, label in required_amounts.items()},
+        **{key: _amount(data.get(key), key.replace("_", " "), optional=True) for key in optional_amounts},
         **{key: data.get(key, "unknown") for key in trends},
     ))
     assistant, workspace_id = _assistant(), g.workspace_id

@@ -89,7 +89,8 @@ CREATE TABLE public.demo_companies (
 The runtime database role needs `SELECT` on this table. Keep template writes
 with the database owner or setup role. Each new workspace copies the templates
 as regular customers with new IDs and the sample tiers, in the workspace
-creation transaction. Existing workspaces keep their records as-is. The
+creation transaction. Existing workspaces get missing examples when the
+company list loads, with existing records preserved. The
 sample figures are submitted data and initialization creates no research,
 activity, evaluation or tier-change history. An empty template table
 produces an empty workspace, so check that the four source rows are present
@@ -517,8 +518,8 @@ The backend computes travel scale, coverage, weighted intensity and eligible
 tier targets. One admitted core travel signal can support a provisional
 prediction. Customer downgrades require at least three completed months,
 known qualifying eligibility inputs and Medium confidence without material
-eligibility uncertainty. Adoption remains contextual. Activity metrics such as
-total GBV and average monthly bookings may be left blank as unknown. Both directions
+eligibility uncertainty. Adoption remains contextual. The Customer Activity form requires total GBV and
+average monthly bookings. Historical snapshots can still contain missing values. Both directions
 require explicit approval and the existing freshness checks.
 
 Run the revised tests and optional live smoke cases with isolated local PostgreSQL:

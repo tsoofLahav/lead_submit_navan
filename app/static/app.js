@@ -582,8 +582,8 @@ function openForm(type) {
   } else {
     fields.push(select("current_tier", "Current tier *", ["1", "2", "3"], true),
       field("months", "Months since signup", "number", { required: true, min: "1" }),
-      field("total_gbv", "Total GBV since signup (USD)", "number", { min: "0" }),
-      field("avg_monthly_bookings", "Average monthly bookings", "number", { min: "0" }),
+      field("total_gbv", "Total GBV since signup (USD)", "number", { required: true, min: "0" }),
+      field("avg_monthly_bookings", "Average monthly bookings", "number", { required: true, min: "0" }),
       field("employee_count", "Current employee count", "number", { min: "1" }),
       field("avg_monthly_active_users", "Average monthly active users", "number", { min: "0" }),
       field("avg_monthly_support_requests", "Average monthly support requests", "number", { min: "0" }));
@@ -649,17 +649,18 @@ $("customer").onclick = () => openForm("customer");
 $("close").onclick = $("cancel").onclick = () => $("modal").close();
 $("submission").onsubmit = async event => {
   event.preventDefault();
+  const submitForm = event.currentTarget;
+  if (!submitForm.reportValidity()) return;
   const id = active;
   const type = formType;
   if (!id || isBusy(id)) {
     $("formError").textContent = "An operation is already running in this conversation.";
     return;
   }
-  const payload = formPayload(type, event.currentTarget);
-  const button = event.currentTarget.querySelector('button[type="submit"]');
+  const payload = formPayload(type, submitForm);
+  const button = submitForm.querySelector('button[type="submit"]');
   button.disabled = true;
   $("formError").textContent = "";
-  const submitForm = event.currentTarget;
   const modal = $("modal");
   const revision = formRevision;
   try {
