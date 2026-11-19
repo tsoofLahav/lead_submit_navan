@@ -10,10 +10,6 @@ from .ai.schemas import (
 )
 from .tier_eligibility import MIN_GBV_MONTHS, TIER_1_GBV, TIER_2_EMPLOYEES, TIER_2_GBV, possible_eligible_tiers
 
-REVISION_HEADERS = frozenset({
-    "Demo edition — revised evidence handling and validation (19 November 2026)",
-    "Demo edition — revised evidence handling, validation and targeted research (19 November 2026)",
-})
 ISOLATABLE = {
     "research.value_or_range", "research.blank_value", "research.nonfinite_value",
     "research.invalid_range", "research.unsourced_evidence", "research.invalid_source_url",
@@ -56,7 +52,8 @@ def normalize_research(output: ScopedResearchOutput) -> ScopedResearchOutput:
         status, gap = finding.status, finding.information_gap
         if not evidence:
             status = "missing"
-            gap = _gap(gap, "No supported observation remains." if notes else "No supported observation was reported.")
+            if notes or not validation._nonempty(gap):
+                gap = _gap(gap, "No supported observation remains." if notes else "No supported observation was reported.")
         elif (
             finding.status == "conflicting"
             and len({(str(item.value), repr(item.estimated_range)) for item in evidence}) < 2
@@ -71,7 +68,7 @@ def normalize_research(output: ScopedResearchOutput) -> ScopedResearchOutput:
             gap = _gap(gap, note)
         findings.append(finding.model_copy(update={"evidence": evidence, "status": status, "information_gap": gap}))
     result = output.model_copy(update={"signals": findings})
-    validation.validate_research(result, revised=True)
+    validation.validate_research(result)
     return result
 
 
@@ -220,32 +217,35 @@ def compute_predictions(
     weight = sum(validation.TRAVEL_WEIGHTS[key] for key in admitted)
     weighted = sum(validation.TRAVEL_WEIGHTS[key] * item.rating for key, item in admitted.items())
     level, intensity, score = "unknown", None, None
-    if weight * 2 >= sum(validation.TRAVEL_WEIGHTS.values()):
+    core_count = len(admitted.keys() & validation.TRAVEL_CORE)
+    if core_count and scale is not None:
         score = str(Decimal(weighted) / weight)
         intensity = "low" if 100 * weighted < 67 * weight else "high" if 100 * weighted > 133 * weight else "medium"
-        if scale is not None:
-            level = validation.TRAVEL_MATRIX[scale][("low", "medium", "high").index(intensity)]
+        level = validation.TRAVEL_MATRIX[scale][("low", "medium", "high").index(intensity)]
     travel_gaps = list(travel.information_gaps)
     if scale is None:
         travel_gaps.append("The applicable employee evidence does not establish one company scale.")
-    if weight * 2 < sum(validation.TRAVEL_WEIGHTS.values()):
-        travel_gaps.append(f"Admitted travel evidence covers {weight} of 11 weight units; at least 6 are required.")
-    material = any(item.material_uncertainty for item in travel.intensity_ratings)
+    if not core_count:
+        travel_gaps.append("No supported core travel signal was established.")
+    material = any(item.material_uncertainty for item in travel.intensity_ratings) or _material_disagreement(
+        findings, admitted.keys() & validation.TRAVEL_CORE,
+    )
     travel_confidence = travel.confidence
     if level == "unknown":
         travel_confidence = "insufficient"
     elif travel_confidence == "insufficient":
         level = "unknown"
         travel_gaps.append("The assessment reports insufficient confidence in a travel conclusion.")
-    elif material and travel_confidence == "high":
+    elif (core_count == 1 or material) and travel_confidence == "high":
         travel_confidence = "medium"
-        travel_gaps.append("Material uncertainty in a travel rating limits confidence.")
+        travel_gaps.append("High confidence requires consistent evidence for both core travel signals.")
     travel_output = ComputedTravelPrediction(
         level=level, confidence=travel_confidence, supporting_signals=travel.supporting_signals,
         rationale=travel.rationale if level != "unknown" else " ".join(travel_gaps or ["Travel potential is unknown."]),
         information_gaps=list(dict.fromkeys(travel_gaps)), company_scale=scale,
         intensity_ratings=[admitted[rating.signal] for rating in travel.intensity_ratings if rating.signal in admitted],
-        admitted_weight=weight, weighted_score=score, intensity=intensity,
+        admitted_weight=weight, possible_weight=sum(validation.TRAVEL_WEIGHTS.values()),
+        weighted_score=score, intensity=intensity,
     )
 
     growth_evidence = _relevant_for_refs(findings, growth.supporting_signals)
@@ -261,12 +261,7 @@ def compute_predictions(
                     item.observation_key, set(),
                 ).add(key)
     secondary_ok = any(len(observations) >= 2 for observations in secondary.values())
-    only_hiring_funding = not primary and not any(
-        Signal.INTERNATIONAL in keys for group in secondary.values() if len(group) >= 2 for keys in group.values()
-    )
-    if growth.level == "unknown" or growth.confidence == "insufficient" or not (primary or secondary_ok) or (
-        growth.level == "high" and only_hiring_funding
-    ):
+    if growth.level == "unknown" or growth.confidence == "insufficient" or not (primary or secondary_ok):
         growth = _unsupported(growth, "Available evidence does not establish the proposed growth direction and strength.")
     else:
         growth = _partial_confidence(growth, _material_disagreement(findings, growth.supporting_signals))
@@ -274,8 +269,9 @@ def compute_predictions(
     support_evidence = _relevant_for_refs(findings, support.supporting_signals)
     if (
         support.level == "unknown" or support.confidence == "insufficient"
-        or not support_evidence.get(Signal.COMPLEXITY)
-        or not any(support_evidence.get(key) for key in validation.SUPPORT_CONTEXT)
+        or not (support_evidence.get(Signal.COMPLEXITY) or (
+            support_evidence.get(Signal.COMPANY_SIZE) and support_evidence.get(Signal.GEOGRAPHY)
+        ))
     ):
         support = _unsupported(support, "Relevant, reliable organizational complexity and contextual evidence are required.")
     else:
@@ -345,10 +341,30 @@ def lead_targets(lead, tier: int, research: ScopedResearchOutput, predictions) -
 
 
 def customer_targets(activity, assessment) -> dict[int, list[str]]:
-    if activity.months_since_signup < MIN_GBV_MONTHS or (assessment is not None and assessment.confidence != "medium"):
+    if activity.months_since_signup < MIN_GBV_MONTHS or (assessment is not None and (
+        assessment.confidence != "medium" or assessment.material_eligibility_uncertainty
+    )):
         return {}
     tier = max(possible_eligible_tiers(activity.total_gbv, activity.months_since_signup, activity.employee_count))
-    if tier >= activity.current_tier:
+    if tier > activity.current_tier:
+        # A lower tier must be established, without treating unknown inputs as below threshold.
+        gbv = activity.total_gbv
+        employees = activity.employee_count
+        if gbv is None:
+            return {}
+        annualized_numerator = 12 * gbv
+        if tier == 2 and annualized_numerator < TIER_1_GBV * activity.months_since_signup:
+            if annualized_numerator >= TIER_2_GBV * activity.months_since_signup:
+                return {2: ["annualized_gbv"]}
+            if employees is not None and employees >= TIER_2_EMPLOYEES:
+                return {2: ["annualized_gbv", "employee_count"]}
+        if (
+            tier == 3 and annualized_numerator < TIER_2_GBV * activity.months_since_signup
+            and employees is not None and employees < TIER_2_EMPLOYEES
+        ):
+            return {3: ["annualized_gbv", "employee_count"]}
+        return {}
+    if tier == activity.current_tier:
         return {}
     keys = []
     threshold = TIER_1_GBV if tier == 1 else TIER_2_GBV

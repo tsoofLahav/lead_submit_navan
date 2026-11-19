@@ -322,3 +322,16 @@ def test_acceptance_rolls_back_all_changes(sessions, workspace_ids, monkeypatch)
         evaluation = session.get(Evaluation, evaluation_id)
         assert evaluation.decision_status == "pending" and evaluation.decided_at is None
         assert not changes(session, company.company_id)
+
+
+def test_workspace_creation_rolls_back_if_templates_cannot_be_copied(browser_app, sessions, monkeypatch):
+    def fail(_):
+        raise RuntimeError("Could not build template insert")
+
+    monkeypatch.setattr("app.workspaces.insert", fail)
+    browser_app.testing = True
+    with pytest.raises(RuntimeError, match="template insert"):
+        submit_workspace(browser_app.test_client())
+    with sessions() as session:
+        assert session.scalar(select(func.count()).select_from(Workspace)) == 0
+        assert session.scalar(select(func.count()).select_from(Company)) == 0

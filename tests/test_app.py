@@ -18,7 +18,7 @@ def app(monkeypatch):
 
 def test_create_app(app):
     configure_mappers()
-    assert len(Base.registry.mappers) == 10
+    assert len(Base.registry.mappers) == 11
     assert app.extensions["db_engine"].url.drivername == "postgresql+psycopg"
     assert app.extensions["db_engine"].url.query["sslmode"] == "require"
 

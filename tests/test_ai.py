@@ -15,14 +15,14 @@ from app.ai.config import AISettings, Component
 from app.ai.progress import ProgressKind
 from app.ai.prompts import PromptRenderError, PromptRenderer, Task
 from app.ai.schemas import (
-    LeadPredictionOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput, Signal, StructuredOutput,
+    LeadAssessmentOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput, ScopedResearchOutput, Signal, StructuredOutput,
     evaluation_output_fields,
 )
 from app.ai.tools import ReadOnlyFunction, ToolError, ToolRegistry, strict_schema
 from app.reference_data import PromptNotFound
 from app.reevaluation_gate import ReevaluationGate
 from app.validation import (
-    AIOutputValidationError, CustomerActivityInput, LeadInput, validate_lead_prediction,
+    AIOutputValidationError, CustomerActivityInput, LeadInput,
     validate_product_assessment, validate_recommendation, validate_research,
 )
 
@@ -72,6 +72,13 @@ def missing_research():
         {"signal": signal, "status": "missing", "evidence": [], "information_gap": "No reliable details."}
         for signal in Signal
     ]}))
+
+
+def scoped_evidence(value, **fields):
+    return {"value": value, "estimated_range": None, "reliability": "high", "evidence_type": "direct",
+            "sources": [], "context": None, "applicable": True, "approximation": False,
+            "treatment": "usable", "employee_bounds": None, "observation_key": None,
+            "observation_period": None, "growth_direction": None, **fields}
 
 
 def render_research(renderer):
@@ -215,7 +222,7 @@ def test_sdk_request_stream_progress_and_budget(renderer, monkeypatch):
     assert result.metadata.completed_hosted_tool_calls == 1
     assert result.metadata.usage.total_tokens == 30 and result.metadata.validation_passed
     assert result.metadata.actual_service_tier == "fast" and result.metadata.duration_seconds >= 0
-    assert result.output == missing_research()
+    assert result.output.model_dump() == missing_research().model_dump()
 
 
 @pytest.mark.parametrize(
@@ -289,7 +296,7 @@ def test_chat_dispatches_authorized_function_using_server_workspace(renderer):
 
 
 def test_strict_schemas_and_conflicting_research():
-    for model in (ResearchOutput, LeadPredictionOutput, ProductAssessmentOutput, RecommendationOutput):
+    for model in (ScopedResearchOutput, LeadAssessmentOutput, ProductAssessmentOutput, RecommendationOutput):
         assert strict_schema(model)["additionalProperties"] is False
     with pytest.raises(PydanticError):
         RecommendationOutput.model_validate_json('{"outcome":"invalid"}')
@@ -311,24 +318,11 @@ def test_strict_schemas_and_conflicting_research():
         validate_research(conflicting)
 
 
-def test_missing_predictions_cannot_claim_evidence():
-    prediction = {"level": "unknown", "confidence": "insufficient", "supporting_signals": [],
-                  "rationale": "Evidence unavailable.", "information_gaps": ["Missing evidence."]}
-    data = LeadPredictionOutput.model_validate_json(json.dumps({
-        "travel_spend_potential": {**prediction, "company_scale": None, "intensity_ratings": []},
-        "growth_potential": prediction, "expected_support_needs": prediction,
-    }))
-    validate_lead_prediction(data, missing_research())
-    data.growth_potential.supporting_signals.append(Signal.GROWTH)
-    with pytest.raises(AIOutputValidationError, match="missing"):
-        validate_lead_prediction(data, missing_research())
-
-
 def test_snapshot_recommendation_is_eligible_and_mappable():
     gate = ReevaluationGate.assess(ACTIVITY)
     assessment = ProductAssessmentOutput.model_validate_json(json.dumps({
         "findings": [{"evidence": ["annualized_gbv"], "interpretation": "Tier 2 run-rate eligibility."}],
-        "confidence": "medium", "rationale": "Evidence from the current snapshot.", "information_gaps": [],
+        "confidence": "medium", "material_eligibility_uncertainty": False, "rationale": "Evidence from the current snapshot.", "information_gaps": [],
     }))
     decision = RecommendationOutput(
         outcome="upgrade", recommended_tier=2, confidence="medium", key_findings=["Run rate"],
@@ -341,7 +335,7 @@ def test_snapshot_recommendation_is_eligible_and_mappable():
     assert fields["predictions"]["recommendation_evidence"]["outcome"] == "upgrade"
     assert json.loads(json.dumps(fields))["recommended_tier"] == 2
     assert not {"company_id", "decision_status", "decided_at"} & fields.keys()
-    with pytest.raises(AIOutputValidationError, match="eligibility"):
+    with pytest.raises(AIOutputValidationError, match="tier target"):
         validate_recommendation(decision.model_copy(update={"recommended_tier": 1}), **context)
     with pytest.raises(AIOutputValidationError, match="high confidence"):
         validate_recommendation(decision.model_copy(update={"confidence": "high"}), **context)
@@ -390,7 +384,7 @@ def test_unknown_chat_function_stops_without_continuation(renderer):
     assert error.value.kind == FailureKind.TOOL_ERROR and len(requests) == 1
 
 
-def test_snapshot_downgrade_is_blocked_pending_adoption_rule():
+def test_snapshot_downgrade_requires_eligibility_references_not_adoption():
     activity = CustomerActivityInput(
         "Acme", "example.com", 2, 12, total_gbv=Decimal(10_000), employee_count=20,
         avg_monthly_active_users=Decimal(18), travel_spend_trend="decreasing",
@@ -398,7 +392,7 @@ def test_snapshot_downgrade_is_blocked_pending_adoption_rule():
     )
     gate = ReevaluationGate.assess(activity)
     assessment = ProductAssessmentOutput.model_validate_json(json.dumps({
-        "confidence": "medium",
+        "confidence": "medium", "material_eligibility_uncertainty": False,
         "findings": [{"evidence": ["annualized_gbv", "adoption_rate_percent"], "interpretation": "Declining usage."}],
         "rationale": "Current activity assessment.", "information_gaps": [],
     }))
@@ -407,15 +401,17 @@ def test_snapshot_downgrade_is_blocked_pending_adoption_rule():
         supporting_evidence=["annualized_gbv", "adoption_rate_percent"], rationale="Lower tier eligibility.",
         follow_up_actions=[], information_gaps=[],
     )
-    with pytest.raises(AIOutputValidationError, match="sufficient adoption"):
-        validate_recommendation(
-            decision, current_tier=2, assessment=assessment, activity=activity, metrics=gate.metrics, triggers=gate,
-        )
+    context = dict(current_tier=2, assessment=assessment, activity=activity, metrics=gate.metrics, triggers=gate)
+    with pytest.raises(AIOutputValidationError, match="qualifying"):
+        validate_recommendation(decision, **context)
+    validate_recommendation(decision.model_copy(update={
+        "supporting_evidence": ["annualized_gbv", "employee_count"],
+    }), **context)
 
 
 def test_smoke_diagnostics_preserve_rule_safe_value_usage_and_phases(renderer, caplog):
     research = missing_research().model_dump(mode="json")
-    research["signals"][0]["information_gap"] = None
+    research["signals"][0]["signal"] = Signal.EVENTS
     research["signals"][1]["information_gap"] = "private customer information"
     final = terminal([search_item(), message(json.dumps(research))])
     final["response"]["usage"].update(
@@ -438,9 +434,7 @@ def test_smoke_diagnostics_preserve_rule_safe_value_usage_and_phases(renderer, c
     assert error.value.kind == FailureKind.VALIDATION and len(requests) == 1
     assert metadata.validation_passed is False
     diagnostic = metadata.validation_diagnostic
-    assert (diagnostic.rule_id, diagnostic.policy_section, diagnostic.field_path, diagnostic.observed) == (
-        "research.missing_gap", "2.4", "signals[0].information_gap", None,
-    )
+    assert (diagnostic.rule_id, diagnostic.policy_section, diagnostic.field_path) == ("research.signal_coverage", "2.1", "signals")
     assert metadata.usage.cached_input_tokens == 4
     assert metadata.usage.reasoning_output_tokens == 12
     phases = metadata.phases
@@ -454,18 +448,17 @@ def test_smoke_diagnostics_preserve_rule_safe_value_usage_and_phases(renderer, c
 
 def test_rejected_source_reports_path_without_exposing_url(renderer, caplog):
     research = missing_research().model_dump(mode="json")
-    research["signals"][0].update(status="found", evidence=[{
-        "value": 10, "estimated_range": None, "reliability": "high", "evidence_type": "direct", "context": None,
-        "sources": [{"url": "https://private-secret@example.com", "title": "private title", "publication_date": None}],
-    }])
+    research["signals"][0].update(status="missing", evidence=[scoped_evidence(
+        10, sources=[{"url": "https://private-secret@example.com", "title": "private title", "publication_date": None}],
+    )])
     client, _ = mock_client([terminal([search_item(), message(json.dumps(research))])])
     with caplog.at_level("INFO"), pytest.raises(AIExecutionError) as error:
         client.execute(render_research(renderer))
     metadata = error.value.metadata
     diagnostic = metadata.validation_diagnostic
-    assert diagnostic.rule_id == "research.invalid_source_url"
-    assert diagnostic.field_path == "signals[0].evidence[0].sources[0].url"
-    assert diagnostic.observed == "invalid URL"
+    assert diagnostic.rule_id == "research.missing_evidence"
+    assert diagnostic.field_path == "signals[0].evidence"
+    assert diagnostic.observed == {"count": 1}
     assert metadata.usage.cached_input_tokens is None
     assert metadata.usage.reasoning_output_tokens is None
     assert metadata.phases.after_last_search_seconds is None
@@ -474,11 +467,9 @@ def test_rejected_source_reports_path_without_exposing_url(renderer, caplog):
 
 def test_research_correction_cannot_add_sources_or_retry_again(renderer):
     original = missing_research().model_dump(mode="json")
-    original["signals"][0].update(status="found", evidence=[{
-        "value": 42, "estimated_range": None, "sources": [], "reliability": "high",
-        "evidence_type": "direct", "context": None,
-    }])
+    original["signals"][0].update(status="missing", evidence=[scoped_evidence(42)])
     corrected = json.loads(json.dumps(original))
+    corrected["signals"][0].update(status="found", information_gap=None)
     corrected["signals"][0]["evidence"][0]["sources"] = [
         {"url": "https://example.com/invented", "title": None, "publication_date": None},
     ]
@@ -491,7 +482,7 @@ def test_research_correction_cannot_add_sources_or_retry_again(renderer):
     assert len(requests) == 2
     metadata = caught.value.metadata
     assert metadata.validation_diagnostic.rule_id == "correction.new_source"
-    assert metadata.correction.initial_diagnostic.rule_id == "research.unsourced_evidence"
+    assert metadata.correction.initial_diagnostic.rule_id == "research.missing_evidence"
     assert not metadata.correction.succeeded
 
 
@@ -516,7 +507,7 @@ def test_output_limit_records_usage_without_accepting_or_correcting_partial_json
 
 def test_budget_blocks_correction_using_cost_from_previous_stages(renderer):
     invalid = missing_research().model_dump(mode="json")
-    invalid["signals"][0]["information_gap"] = None
+    invalid["signals"][0]["signal"] = Signal.EVENTS
     final = terminal([search_item(), message(json.dumps(invalid))])
     # High observed input leaves less than the correction reservation.
     final["response"]["usage"].update(input_tokens=95_000, total_tokens=95_020)
@@ -528,7 +519,7 @@ def test_budget_blocks_correction_using_cost_from_previous_stages(renderer):
     assert caught.value.kind == FailureKind.EVALUATION_BUDGET
     assert len(requests) == 1 and budget.accounted_usd > 2
     assert all(event.kind != ProgressKind.OUTPUT_CORRECTION_STARTED for event in progress)
-    assert caught.value.metadata.correction.initial_diagnostic.rule_id == "research.missing_gap"
+    assert caught.value.metadata.correction.initial_diagnostic.rule_id == "research.signal_coverage"
 
 
 @pytest.mark.parametrize("seconds,amount,expected", [

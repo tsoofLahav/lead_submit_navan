@@ -2,7 +2,10 @@ from uuid import UUID
 
 from flask import current_app, session as browser_session
 
-from .models import Workspace
+from sqlalchemy import literal, select
+from sqlalchemy.dialects.postgresql import insert
+
+from .models import Company, DemoCompany, Workspace
 
 COOKIE_WORKSPACE_KEY = "workspace_id"
 
@@ -25,6 +28,18 @@ def resolve_workspace() -> UUID:
             db_session.add(workspace)
             db_session.flush()
             workspace_id = workspace.id
+            templates = select(
+                literal(workspace_id), DemoCompany.name, DemoCompany.domain,
+                DemoCompany.submitted_annual_gbv, DemoCompany.employee_count, DemoCompany.current_tier,
+                literal(True),
+            )
+            db_session.execute(
+                insert(Company).from_select(
+                    ("workspace_id", "name", "domain", "submitted_annual_gbv", "employee_count",
+                     "current_tier", "is_customer"),
+                    templates,
+                ).on_conflict_do_nothing(index_elements=(Company.workspace_id, Company.domain))
+            )
 
     if raw_id != str(workspace_id):
         browser_session[COOKIE_WORKSPACE_KEY] = str(workspace_id)

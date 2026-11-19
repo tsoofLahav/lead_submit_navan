@@ -9,7 +9,7 @@ from typing import Literal
 from .ai.schemas import (
     ActivityEvidence, LeadPredictionOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput, Signal,
 )
-from .tier_eligibility import MIN_GBV_MONTHS, TIER_1_GBV, TIER_2_EMPLOYEES, TIER_2_GBV, possible_eligible_tiers
+from .tier_eligibility import MIN_GBV_MONTHS, possible_eligible_tiers
 
 
 Trend = Literal["increasing", "stable", "decreasing", "unknown"]
@@ -146,10 +146,8 @@ class AIOutputValidationError(ValueError):
         self.additional_diagnostics = additional_diagnostics
 
 
-TRAVEL_WEIGHTS = {
-    Signal.SALES: 3, Signal.CUSTOMER_FACING: 3, Signal.INTERNAL_COLLABORATION: 2,
-    Signal.INTERNATIONAL: 2, Signal.CONFERENCES: 1,
-}
+TRAVEL_WEIGHTS = {Signal.EXTERNAL_ACTIVITY: 2, Signal.GEOGRAPHY: 2, Signal.EVENTS: 1}
+TRAVEL_CORE = {Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY}
 TRAVEL_MATRIX = {
     "small": ("low", "low", "medium"),
     "medium": ("low", "medium", "high"),
@@ -158,9 +156,8 @@ TRAVEL_MATRIX = {
 }
 UPGRADE_TRAVEL_LEVELS = {1: set(), 2: {"very_high"}, 3: {"medium", "high", "very_high"}}
 DOWNGRADE_TRAVEL_LEVELS = {1: {"low", "medium"}, 2: {"low"}, 3: set()}
-PRIMARY_GROWTH = {Signal.GROWTH, Signal.EXPANSION}
-SECONDARY_GROWTH = {Signal.INTERNATIONAL, Signal.HIRING, Signal.FUNDING}
-SUPPORT_CONTEXT = {Signal.COMPANY_SIZE, Signal.INTERNATIONAL, Signal.EXPANSION, Signal.INDUSTRY}
+PRIMARY_GROWTH = {Signal.GROWTH}
+SECONDARY_GROWTH = {Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY}
 
 
 def require(
@@ -177,7 +174,7 @@ def _nonempty(text: str | None) -> bool:
     return bool(text and text.strip())
 
 
-def validate_research(output: ResearchOutput, *, revised: bool = False) -> None:
+def validate_research(output: ResearchOutput) -> None:
     names = [finding.signal for finding in output.signals]
     require(len(names) == len(Signal) and set(names) == set(Signal), "Every policy signal must appear exactly once.",
             "research.signal_coverage", "2.1", "signals",
@@ -186,10 +183,8 @@ def validate_research(output: ResearchOutput, *, revised: bool = False) -> None:
     diagnostics = []
     for index, finding in enumerate(output.signals):
         try:
-            _validate_research_signal(finding, index, revised)
+            _validate_research_signal(finding, index)
         except AIOutputValidationError as error:
-            if not revised:
-                raise
             diagnostics.append(error.diagnostic)
             if len(diagnostics) == 5:
                 break
@@ -198,7 +193,7 @@ def validate_research(output: ResearchOutput, *, revised: bool = False) -> None:
         raise AIOutputValidationError(first.message, first, tuple(additional))
 
 
-def _validate_research_signal(finding, index: int, revised: bool) -> None:
+def _validate_research_signal(finding, index: int) -> None:
     path = f"signals[{index}]"
     if finding.status == "missing":
         message = "Missing signals require an explicit gap and no evidence."
@@ -220,10 +215,9 @@ def _validate_research_signal(finding, index: int, revised: bool) -> None:
                 "research.conflict_distinct_values", "4.1", f"{path}.evidence", {"distinct_values": len(values)})
     if finding.status == "estimated":
         require(any(item.evidence_type == "indirect" or item.estimated_range is not None
-                    or (revised and getattr(item, "approximation", False) and bool(item.sources))
+                    or (getattr(item, "approximation", False) and bool(item.sources))
                     for item in finding.evidence),
-                "An estimate requires indirect evidence or a supported range or sourced approximation." if revised else
-                "An estimate requires indirect evidence or a supported range.",
+                "An estimate requires indirect evidence, a supported range or a sourced approximation.",
                 "research.estimate_representation", "2.4", f"{path}.evidence",
                 {"evidence_types": sorted({item.evidence_type for item in finding.evidence}),
                  "range_count": sum(item.estimated_range is not None for item in finding.evidence)})
@@ -276,67 +270,6 @@ def validate_research_evidence(item, evidence_path: str) -> None:
         require(source.url not in urls, message, "research.duplicate_source_url", "4.1",
                 f"{source_path}.url", "duplicate URL")
         urls.add(source.url)
-
-def validate_lead_prediction(output: LeadPredictionOutput, research: ResearchOutput) -> None:
-    validate_research(research)
-    findings = {item.signal: item for item in research.signals}
-    known = {key for key, item in findings.items() if item.status != "missing"}
-    reliable = {
-        key for key, item in findings.items()
-        if item.status in {"found", "estimated"} and any(e.reliability in {"medium", "high"} for e in item.evidence)
-    }
-    for path in ("travel_spend_potential", "growth_potential", "expected_support_needs"):
-        prediction = getattr(output, path)
-        refs = set(prediction.supporting_signals)
-        require(refs <= known and len(refs) == len(prediction.supporting_signals), "Prediction references missing or duplicate signals.",
-                "prediction.signal_references", "3.4, 4.1", f"{path}.supporting_signals", {"count": len(prediction.supporting_signals), "distinct_count": len(refs), "unavailable": sorted(refs - known)})
-        require((prediction.level == "unknown") == (prediction.confidence == "insufficient"), "Unknown predictions must reflect insufficient confidence.",
-                "prediction.unknown_confidence", "4.3", f"{path}.confidence", {"level": prediction.level, "confidence": prediction.confidence})
-        require(_nonempty(prediction.rationale), "A prediction needs a rationale.",
-                "prediction.rationale", "3.4", f"{path}.rationale", "blank")
-        if prediction.level == "unknown":
-            require(any(map(_nonempty, prediction.information_gaps)), "Unknown predictions require an information gap.",
-                "prediction.unknown_gap", "3.4, 4.3", f"{path}.information_gaps", "no nonblank entries")
-        else:
-            require(bool(refs), "A determinate prediction requires supporting signals.",
-                "prediction.missing_signals", "3.4", f"{path}.supporting_signals", [])
-
-    travel = output.travel_spend_potential
-    ratings = {item.signal: item.rating for item in travel.intensity_ratings}
-    require(
-        len(ratings) == len(travel.intensity_ratings)
-        and set(ratings) <= TRAVEL_WEIGHTS.keys() & set(travel.supporting_signals),
-        "Travel ratings must reference distinct policy travel signals.",
-                "prediction.travel_rating_references", "3.1", "travel_spend_potential.intensity_ratings", {"count": len(travel.intensity_ratings), "distinct_count": len(ratings)}
-    )
-    if travel.level != "unknown":
-        require(travel.company_scale is not None and Signal.COMPANY_SIZE in set(travel.supporting_signals) & reliable,
-                "Travel potential requires supported company scale.",
-                "prediction.travel_company_scale", "3.1, 4.3", "travel_spend_potential.company_scale", travel.company_scale)
-        weight = sum(TRAVEL_WEIGHTS[signal] for signal in ratings.keys() & reliable)
-        require(2 * weight >= sum(TRAVEL_WEIGHTS.values()), "Travel potential requires at least half the reliable signal weight.",
-                "prediction.travel_evidence_weight", "3.1, 4.3", "travel_spend_potential.intensity_ratings", weight)
-        total = sum(TRAVEL_WEIGHTS[signal] for signal in ratings)
-        weighted = sum(TRAVEL_WEIGHTS[signal] * value for signal, value in ratings.items())
-        intensity = 0 if 100 * weighted < 67 * total else 2 if 100 * weighted > 133 * total else 1
-        require(travel.level == TRAVEL_MATRIX[travel.company_scale][intensity], "Travel potential disagrees with the policy matrix.",
-                "prediction.travel_matrix", "3.1", "travel_spend_potential.level", travel.level)
-
-    growth = output.growth_potential
-    if growth.level != "unknown":
-        refs = set(growth.supporting_signals) & reliable
-        require(bool(refs & PRIMARY_GROWTH) or len(refs & SECONDARY_GROWTH) >= 2, "Growth prediction lacks minimum supporting indicators.",
-                "prediction.growth_evidence", "4.3", "growth_potential.supporting_signals", sorted(refs))
-        if growth.level == "high":
-            require(bool(refs - {Signal.HIRING, Signal.FUNDING}), "Hiring and funding alone do not establish high growth.",
-                "prediction.high_growth_evidence", "3.2", "growth_potential.supporting_signals", sorted(refs))
-
-    support = output.expected_support_needs
-    if support.level != "unknown":
-        refs = set(support.supporting_signals) & known
-        require(Signal.COMPLEXITY in refs and bool(refs & SUPPORT_CONTEXT), "Support prediction needs complexity and contextual evidence.",
-                "prediction.support_evidence", "4.3", "expected_support_needs.supporting_signals", sorted(refs))
-
 
 def validate_product_assessment(output: ProductAssessmentOutput, activity, metrics, triggers) -> None:
     available = {
@@ -404,16 +337,18 @@ def validate_recommendation(
     require(_nonempty(output.rationale), "A recommendation needs a rationale.",
                 "recommendation.rationale", "5.3", "rationale", "blank")
     changes_tier = output.outcome in {"upgrade", "downgrade"}
-    qualifying_observations = None
 
     if isinstance(assessment, LeadPredictionOutput):
         require(lead is not None and research is not None, "Lead recommendation requires the validated lead and research.",
                 "recommendation.lead_context", "5.2", "context", {"lead_present": lead is not None, "research_present": research is not None})
-        if permissible_targets is None:
-            validate_lead_prediction(assessment, research)
         available = lead_recommendation_evidence(assessment, research, lead)
+        travel = assessment.travel_spend_potential
+        mismatch = travel.level in UPGRADE_TRAVEL_LEVELS[current_tier] | DOWNGRADE_TRAVEL_LEVELS[current_tier]
+        if output.outcome == "retain" and mismatch and not permissible_targets:
+            eligible = possible_eligible_tiers(lead.submitted_annual_gbv, 12, lead.employee_count)
+            require(eligible == {current_tier}, "The apparent mismatch is unresolved. Use Undetermined.",
+                    "recommendation.retain_unsupported", "5.3", "outcome", output.outcome)
         if changes_tier:
-            travel = assessment.travel_spend_potential
             require(output.confidence == "high" and travel.confidence == "high",
                     "Lead tier changes require high-confidence evidence of a mismatch.",
                 "recommendation.lead_confidence", "5.2", "confidence", {"recommendation": output.confidence, "travel": travel.confidence})
@@ -442,21 +377,16 @@ def validate_recommendation(
                 "recommendation.snapshot_medium_confidence", "6.4", "confidence", {"assessment": assessment.confidence, "evidence_count": len(output.supporting_evidence)})
         if changes_tier:
             require(output.confidence == "medium", "A snapshot tier change needs sufficient supporting evidence.",
-                "recommendation.snapshot_change_confidence", "6.4", "confidence", output.confidence)
+                    "recommendation.snapshot_change_confidence", "6.4", "confidence", output.confidence)
+        if output.outcome == "retain":
             eligible = possible_eligible_tiers(activity.total_gbv, activity.months_since_signup, activity.employee_count)
-            if output.outcome == "downgrade":
-                require(False, "The active policy does not yet define sufficient adoption for a downgrade.",
-                        "recommendation.adoption_rule_unset", "6.3", "outcome", output.outcome)
-            qualifying_observations = set()
-            gbv_threshold = TIER_1_GBV if target == 1 else TIER_2_GBV
-            if (
-                activity.months_since_signup >= MIN_GBV_MONTHS and activity.total_gbv is not None
-                and 12 * activity.total_gbv >= gbv_threshold * activity.months_since_signup
-            ):
-                qualifying_observations.add(ActivityEvidence.ANNUALIZED_GBV)
-            if target == 2 and activity.employee_count is not None and activity.employee_count >= TIER_2_EMPLOYEES:
-                qualifying_observations.add(ActivityEvidence.EMPLOYEES)
-
+            require(eligible == {current_tier} and not assessment.material_eligibility_uncertainty,
+                    "The snapshot does not establish that retaining the current tier is supported. Use Undetermined.",
+                    "recommendation.retain_unsupported", "5.3, 6.3", "outcome", output.outcome)
+        if permissible_targets is None:
+            from .revised_policy import customer_targets
+            permissible_targets = customer_targets(activity, assessment)
+            available |= {key for keys in permissible_targets.values() for key in keys}
 
     references = set(output.supporting_evidence)
     require(references <= available and len(references) == len(output.supporting_evidence),
@@ -469,9 +399,8 @@ def validate_recommendation(
             require(target in permissible_targets, "The backend did not establish this tier target.",
                     "recommendation.eligibility", "1, 5.2, 6.3", "recommended_tier", target)
             qualifying = set(permissible_targets[target])
-            cited = qualifying <= references if isinstance(assessment, LeadPredictionOutput) and target == 3 else bool(
-                references & qualifying
-            )
+            all_required = output.outcome == "downgrade" or isinstance(assessment, LeadPredictionOutput) and target == 3
+            cited = qualifying <= references if all_required else bool(references & qualifying)
             require(cited, "Cite qualifying eligibility evidence.",
                     "recommendation.qualifying_evidence", "5.2, 6.3", "supporting_evidence",
                     {"qualifying_fields": permissible_targets[target], "qualifying_references": 0})
@@ -479,6 +408,3 @@ def validate_recommendation(
         established = eligible == {target} if output.outcome == "downgrade" else max(eligible) == target
         require(established, "Known eligibility inputs do not establish the proposed tier.",
                 "recommendation.eligibility", "1, 5.2, 6.3", "recommended_tier", target)
-        if qualifying_observations is not None:
-            require(bool(qualifying_observations & references), "Snapshot upgrade must cite its eligibility evidence.",
-                "recommendation.snapshot_eligibility_evidence", "6.3", "supporting_evidence", {"qualifying_fields": sorted(qualifying_observations), "qualifying_references": 0})

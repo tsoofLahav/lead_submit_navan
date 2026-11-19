@@ -21,17 +21,11 @@ Tier = Annotated[Literal[1, 2, 3], BeforeValidator(_integer_only)]
 
 class Signal(StrEnum):
     COMPANY_SIZE = "company_size"
-    SALES = "sales_and_account_management"
-    CUSTOMER_FACING = "customer_facing_operations"
-    INTERNAL_COLLABORATION = "internal_collaboration"
-    INTERNATIONAL = "international_presence"
-    CONFERENCES = "conferences_and_events"
-    GROWTH = "business_growth"
+    EXTERNAL_ACTIVITY = "external_business_activity"
+    GEOGRAPHY = "geographic_distribution"
+    EVENTS = "corporate_events"
+    GROWTH = "business_growth_and_expansion"
     COMPLEXITY = "operational_complexity"
-    EXPANSION = "market_expansion"
-    HIRING = "hiring_activity"
-    FUNDING = "funding"
-    INDUSTRY = "industry_and_work_model"
 
 
 class ResearchSource(StructuredOutput):
@@ -128,6 +122,10 @@ class ActivityFinding(StructuredOutput):
 
 class ProductAssessmentOutput(StructuredOutput):
     confidence: Literal["medium", "low", "insufficient"]
+    material_eligibility_uncertainty: bool = Field(
+        description="True if unresolved eligibility evidence or snapshot reliability could change a tier decision. "
+        "Missing adoption measurements or adoption trends alone do not count."
+    )
     findings: list[ActivityFinding]
     rationale: str
     information_gaps: list[str]
@@ -222,6 +220,7 @@ class LeadAssessmentOutput(StructuredOutput):
 
 class ComputedTravelPrediction(TravelPrediction):
     admitted_weight: int
+    possible_weight: int
     weighted_score: str | None
     intensity: Literal["low", "medium", "high"] | None
 

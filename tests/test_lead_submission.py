@@ -11,7 +11,7 @@ from app.human_approval import HumanApproval
 from app.models import BusinessPolicy, Company, CompanyResearch, Evaluation, Prompt, TierChange
 from app.orchestrator import LeadResult, LeadStage, LeadWorkflowFailure, Orchestrator
 from app.validation import CustomerActivityInput, LeadInput
-from test_ai import POLICY, SYSTEM, message, missing_research, mock_client, search_item, terminal
+from test_ai import POLICY, SYSTEM, message, missing_research, mock_client, scoped_evidence, search_item, terminal
 
 pytestmark = pytest.mark.write_integration
 LEAD = LeadInput("Acme", "example.com", Decimal("100000"))
@@ -43,36 +43,40 @@ def research_data(*, mixed=False):
     if not mixed:
         return data
     for finding in data["signals"]:
-        if finding["signal"] in {Signal.COMPANY_SIZE, Signal.SALES, Signal.CUSTOMER_FACING, Signal.EXPANSION}:
-            finding.update(status="found", information_gap=None, evidence=[{
-                "value": 510 if finding["signal"] == Signal.COMPANY_SIZE else "Documented activity",
-                "estimated_range": None, "reliability": "high", "evidence_type": "direct", "context": None,
-                "sources": [{"url": "https://example.com/report", "title": None, "publication_date": None}],
-            }])
-        if finding["signal"] == Signal.FUNDING:
+        signal = finding["signal"]
+        if signal in {Signal.COMPANY_SIZE, Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY, Signal.GROWTH}:
+            bounds = {"lower": 510, "upper": 510, "scope": "evaluated_population", "basis": "employees",
+                      "as_of": None, "submitted_count_resolution": None} if signal == Signal.COMPANY_SIZE else None
+            finding.update(status="found", information_gap=None, evidence=[scoped_evidence(
+                510 if bounds else "Documented activity", employee_bounds=bounds,
+                growth_direction="increasing" if signal == Signal.GROWTH else None,
+                sources=[{"url": "https://example.com/report", "title": None, "publication_date": None}],
+            )])
+        if signal == Signal.EVENTS:
             finding.update(status="conflicting", evidence=[
-                {"value": value, "estimated_range": None, "reliability": "medium", "evidence_type": "direct", "context": None,
-                 "sources": [{"url": f"https://example.com/funding/{value}", "title": None, "publication_date": None}]}
-                for value in (10, 20)
+                scoped_evidence(value, reliability="medium", sources=[
+                    {"url": f"https://example.com/events/{value}", "title": None, "publication_date": None},
+                ]) for value in (10, 20)
             ])
     return data
 
 
 def prediction_data(*, mixed=False):
-    travel = {**UNKNOWN, "company_scale": None, "intensity_ratings": []}
+    travel = {key: value for key, value in UNKNOWN.items() if key != "level"}
+    travel["intensity_ratings"] = []
     growth = UNKNOWN
     if mixed:
-        travel.update(level="very_high", confidence="high", company_scale="very_large",
-                      supporting_signals=[Signal.COMPANY_SIZE, Signal.SALES, Signal.CUSTOMER_FACING],
-                      intensity_ratings=[{"signal": signal, "rating": 2} for signal in (Signal.SALES, Signal.CUSTOMER_FACING)])
-        growth = {**UNKNOWN, "level": "medium", "confidence": "low", "supporting_signals": [Signal.EXPANSION]}
+        travel.update(confidence="high",
+                      supporting_signals=[Signal.COMPANY_SIZE, Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY],
+                      intensity_ratings=[{"signal": signal, "rating": 2, "evidence_indices": [0], "material_uncertainty": False} for signal in (Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY)])
+        growth = {**UNKNOWN, "level": "medium", "confidence": "low", "supporting_signals": [Signal.GROWTH]}
     return {"travel_spend_potential": travel, "growth_potential": growth, "expected_support_needs": UNKNOWN}
 
 
 def decision_data(outcome="undetermined", tier=None, confidence="insufficient"):
     return {
         "outcome": outcome, "recommended_tier": tier, "confidence": confidence,
-        "key_findings": ["Evidence considered."], "supporting_evidence": ["travel_spend_potential"] if outcome == "upgrade" else [],
+        "key_findings": ["Evidence considered."], "supporting_evidence": ["travel_spend_potential", "submitted_annual_gbv"] if outcome == "upgrade" else [],
         "rationale": "Qualitative research informs the assessment.",
         "follow_up_actions": ["Follow up on evidence gaps."], "information_gaps": ["More observation needed."],
     }
@@ -118,17 +122,17 @@ def test_complete_lead_with_missing_research_and_progress(sessions, workspace_id
         ProgressKind.RECOMMENDATION_COMPLETED, ProgressKind.EVALUATION_COMPLETED,
     ]
     assert [request["text"]["format"]["name"] for request in requests] == [
-        "ResearchOutput", "LeadPredictionOutput", "RecommendationOutput",
+        "ScopedResearchOutput", "LeadAssessmentOutput", "RecommendationOutput",
     ]
     for request in requests:
         assert request["input"][0]["content"].count(POLICY) == 1
         assert "previous_response_id" not in request
     assert requests[0]["tools"][0]["type"] == "web_search"
     assert not requests[1]["tools"] and not requests[2]["tools"]
-    assert json.loads(requests[1]["input"][1]["content"])["validated_research_findings"] == research_data()
+    assert len(json.loads(requests[1]["input"][1]["content"])["validated_research_findings"]["signals"]) == 6
     decision_context = json.loads(requests[2]["input"][1]["content"])
-    assert decision_context["current_tier"] == 2 and decision_context["validated_predictions"] == prediction_data()
-    assert decision_context["allowed_supporting_evidence"] == ["submitted_annual_gbv"]
+    assert decision_context["current_tier"] == 2 and decision_context["validated_predictions"] == result.predictions.model_dump(mode="json")
+    assert "submitted_annual_gbv" in decision_context["allowed_supporting_evidence"]
     assert "copy only exact identifiers" in requests[2]["input"][0]["content"]
 
     with sessions() as session:
@@ -234,8 +238,8 @@ def test_newer_activity_or_tier_prevents_actionable_persistence(sessions, worksp
 @pytest.mark.parametrize(
     ("failed_component", "expected_rule"),
     [
-        ("research", "research.unsourced_evidence"),
-        ("prediction", "prediction.travel_company_scale"),
+        ("research", "research.missing_evidence"),
+        ("prediction", "prediction.travel_rating_references"),
         ("decision", "recommendation.direction"),
     ],
 )
@@ -247,17 +251,12 @@ def test_workflow_corrects_only_failed_stage_with_tools_disabled(sessions, works
     if failed_component == "research":
         invalid = research_data(mixed=True)
         size = next(row for row in invalid["signals"] if row["signal"] == Signal.COMPANY_SIZE)
-        size["evidence"].append({**size["evidence"][0], "sources": [], "value": 900})
+        size.update(status="missing", information_gap="Scope needs verification.")
         batches = [response(invalid, research=True), response(research), response(prediction), response(valid_decision)]
     elif failed_component == "prediction":
-        size = next(row for row in research["signals"] if row["signal"] == Signal.COMPANY_SIZE)
-        size["status"] = "conflicting"
-        size["information_gap"] = "The sources refer to different reporting scopes."
-        size["evidence"].append({**size["evidence"][0], "value": 850})
-        corrected = {**prediction, "travel_spend_potential": {
-            **prediction_data()["travel_spend_potential"], "information_gaps": [size["information_gap"]],
-        }}
-        batches = [response(research, research=True), response(prediction), response(corrected), response(valid_decision)]
+        invalid = prediction_data(mixed=True)
+        invalid["travel_spend_potential"]["intensity_ratings"][0]["evidence_indices"] = [99]
+        batches = [response(research, research=True), response(invalid), response(prediction), response(valid_decision)]
     else:
         batches = [response(research, research=True), response(prediction), response(decision_data("retain", 3, "low")),
                    response(valid_decision)]
@@ -267,7 +266,7 @@ def test_workflow_corrects_only_failed_stage_with_tools_disabled(sessions, works
     result = Orchestrator(sessions, ai_client=client).submit_lead(owner, LEAD, on_progress=events.append)
     assert counts(sessions) == (1, 1, 1)
     assert len(requests) == 4
-    assert [request["text"]["format"]["name"] for request in requests].count("ResearchOutput") == (
+    assert [request["text"]["format"]["name"] for request in requests].count("ScopedResearchOutput") == (
         2 if failed_component == "research" else 1
     )
     assert sum(request["tool_choice"] == "required" for request in requests) == 1

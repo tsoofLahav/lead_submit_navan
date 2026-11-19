@@ -44,6 +44,22 @@ class Workspace(UUIDRecord, CreatedRecord, Base):
     __tablename__ = "workspaces"
 
 
+class DemoCompany(UUIDRecord, Base):
+    """Global templates read during workspace creation."""
+
+    __tablename__ = "demo_companies"
+    __table_args__ = (
+        UniqueConstraint("domain", name="demo_companies_domain_key"),
+        CheckConstraint("current_tier >= 1 AND current_tier <= 3", name="demo_companies_current_tier_check"),
+    )
+
+    name: Mapped[str] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(Text)
+    submitted_annual_gbv: Mapped[Decimal] = mapped_column(Numeric(15, 2))
+    employee_count: Mapped[int | None] = mapped_column(Integer)
+    current_tier: Mapped[int] = mapped_column(Integer)
+
+
 class Company(UUIDRecord, CreatedRecord, Base):
     __tablename__ = "companies"
     __table_args__ = (

@@ -129,7 +129,6 @@ function evaluation(message, conversationId) {
     create("h2", body.company_name || company?.name || "Company evaluation"),
     create("strong", `Tier ${numeric(body.current_tier)} · ${titleCase(decision.outcome)}${decision.recommended_tier == null ? "" : " Tier " + decision.recommended_tier}`),
     create("div", `${titleCase(decision.confidence)} confidence · ${titleCase(metadata.decision_status)}`, "muted"),
-    create("h4", "Recommendation rationale"),
     create("p", decision.rationale || message.content)
   );
 
@@ -145,6 +144,9 @@ function evaluation(message, conversationId) {
       if (!prediction) continue;
       section.append(create("h4", `${title} · ${titleCase(prediction.level)} · ${label(prediction.confidence)} confidence`),
         create("p", prediction.rationale || ""));
+      if (key === "travel_spend_potential" && prediction.admitted_weight != null && prediction.possible_weight != null) {
+        section.append(create("p", `Supported travel weight: ${prediction.admitted_weight} of ${prediction.possible_weight}`, "muted"));
+      }
       items(section, prediction.supporting_signals?.map(titleCase));
       items(section, prediction.information_gaps);
     }

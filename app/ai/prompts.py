@@ -12,7 +12,7 @@ from ..reevaluation_gate import ActivityMetrics, ReevaluationGate, TriggerResult
 from ..reference_data import get_business_policy, get_prompt
 from ..validation import (
     AIOutputValidationError, CustomerActivityInput, LeadInput, TIERS, ValidationError,
-    lead_recommendation_evidence, product_recommendation_evidence, validate_activity, validate_lead, validate_lead_prediction, validate_product_assessment, validate_research,
+    lead_recommendation_evidence, product_recommendation_evidence, validate_activity, validate_lead, validate_product_assessment, validate_research,
 )
 from .diagnostics import digest
 from .config import AISettings, Component
@@ -54,12 +54,12 @@ class TaskSpec:
 TASKS = {
     Task.LEAD_RESEARCH: TaskSpec(
         Component.RESEARCH, "lead_submit_system", {"company_profile": LeadInput},
-        "research_schema", ResearchOutput,
+        "research_schema", ScopedResearchOutput,
     ),
     Task.LEAD_PREDICTION: TaskSpec(
         Component.PREDICTION, "lead_submit_system",
         {"company_profile": LeadInput, "validated_research_findings": ResearchOutput},
-        "prediction_schema", LeadPredictionOutput,
+        "prediction_schema", LeadAssessmentOutput,
     ),
     Task.LEAD_RECOMMENDATION: TaskSpec(
         Component.DECISION, "lead_submit_system",
@@ -90,15 +90,10 @@ class RenderedPrompt:
     settings: AISettings
     context: dict
     tool_options: dict
-    revised: bool = False
     diagnostics: dict = field(default_factory=dict)
 
     @property
     def output_schema(self):
-        if self.revised and self.task == Task.LEAD_RESEARCH:
-            return ScopedResearchOutput
-        if self.revised and self.task == Task.LEAD_PREDICTION:
-            return LeadAssessmentOutput
         return TASKS[self.task].schema
 
 
@@ -140,7 +135,6 @@ class PromptRenderer:
             inputs = {**inputs, "history": []}
         if inputs.keys() != spec.input_types.keys():
             raise PromptRenderError("Prompt inputs do not match the task's required fields.")
-        use_revised = task != Task.CHAT and not revised_policy.REVISION_HEADERS.isdisjoint(policy.splitlines()[:4])
         context = dict(inputs)
         data = {}
         for key, expected in spec.input_types.items():
@@ -168,21 +162,18 @@ class PromptRenderer:
 
         try:
             if task == Task.LEAD_PREDICTION:
-                validate_research(inputs["validated_research_findings"], revised=use_revised)
+                validate_research(inputs["validated_research_findings"])
             elif task == Task.LEAD_RECOMMENDATION:
                 predictions = inputs["validated_predictions"]
                 research = inputs["validated_research_findings"]
-                if use_revised:
-                    context["tier_alignment"] = revised_policy.tier_alignment(
-                        predictions.travel_spend_potential.level, inputs["current_tier"],
-                    )
-                    context["permissible_targets"] = revised_policy.lead_targets(
-                        inputs["company_profile"], inputs["current_tier"], research, predictions,
-                    )
-                    data["tier_alignment"] = context["tier_alignment"]
-                    data["permissible_targets"] = context["permissible_targets"]
-                else:
-                    validate_lead_prediction(predictions, research)
+                context["tier_alignment"] = revised_policy.tier_alignment(
+                    predictions.travel_spend_potential.level, inputs["current_tier"],
+                )
+                context["permissible_targets"] = revised_policy.lead_targets(
+                    inputs["company_profile"], inputs["current_tier"], research, predictions,
+                )
+                data["tier_alignment"] = context["tier_alignment"]
+                data["permissible_targets"] = context["permissible_targets"]
                 data["allowed_supporting_evidence"] = sorted(
                     lead_recommendation_evidence(predictions, research, inputs["company_profile"])
                 )
@@ -190,23 +181,21 @@ class PromptRenderer:
                 assessment = inputs["validated_product_assessment"]
                 validate_product_assessment(assessment, activity, gate.metrics, gate)
                 evidence = product_recommendation_evidence(assessment)
-                if use_revised:
-                    context["permissible_targets"] = revised_policy.customer_targets(activity, assessment)
-                    data["permissible_targets"] = context["permissible_targets"]
-                    evidence |= {key for keys in context["permissible_targets"].values() for key in keys}
+                context["permissible_targets"] = revised_policy.customer_targets(activity, assessment)
+                data["permissible_targets"] = context["permissible_targets"]
+                evidence |= {key for keys in context["permissible_targets"].values() for key in keys}
                 data["allowed_supporting_evidence"] = sorted(evidence)
         except AIOutputValidationError as error:
             raise PromptRenderError(str(error)) from None
 
-        if use_revised:
-            if task in (Task.LEAD_RESEARCH, Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
-                data["submitted_data_provenance"] = "Entered by the user. No independent company attribution."
-            if task in (Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION):
-                data["eligible_tier_candidates"] = sorted(revised_policy.possible_eligible_tiers(
-                    activity.total_gbv, activity.months_since_signup, activity.employee_count,
-                ))
-                if task == Task.REEVALUATION_PREDICTION:
-                    data["permissible_targets"] = revised_policy.customer_targets(activity, None)
+        if task in (Task.LEAD_RESEARCH, Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
+            data["submitted_data_provenance"] = "Entered by the user. No independent company attribution."
+        if task in (Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION):
+            data["eligible_tier_candidates"] = sorted(revised_policy.possible_eligible_tiers(
+                activity.total_gbv, activity.months_since_signup, activity.employee_count,
+            ))
+            if task == Task.REEVALUATION_PREDICTION:
+                data["permissible_targets"] = revised_policy.customer_targets(activity, None)
 
         if task in (Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
             research_payload = inputs["validated_research_findings"].model_dump(mode="json", exclude_none=True)
@@ -262,11 +251,7 @@ class PromptRenderer:
         if spec.schema is not None:
             task_template = self._get_prompt(task.value)
             slots = {key: f"the {key} field of the structured task input" for key in data}
-            output_schema = (
-                ScopedResearchOutput if use_revised and task == Task.LEAD_RESEARCH else
-                LeadAssessmentOutput if use_revised and task == Task.LEAD_PREDICTION else spec.schema
-            )
-            slots[spec.schema_slot] = _json(strict_schema(output_schema))
+            slots[spec.schema_slot] = _json(strict_schema(spec.schema))
             template_checksums[task.value] = digest(task_template)
             schema_instruction_bytes = len(slots[spec.schema_slot].encode()) * _PLACEHOLDER.findall(task_template).count(spec.schema_slot)
             required_slots = set(slots) - {
@@ -297,27 +282,6 @@ class PromptRenderer:
                 "Assess activity, eligibility evidence, support demand and uncertainty only. "
                 "Reserve the recommendation outcome, proposed tier and follow-up actions for the decision request."
             )
-        if task == Task.REEVALUATION_RECOMMENDATION:
-            instructions.append(
-                "Customer downgrades are disabled in this demo. When a downgrade might otherwise be "
-                "considered, use a policy-compatible retain or undetermined outcome and explain the "
-                "limitation and relevant information gaps. Cite a qualifying eligibility key."
-            )
-        if use_revised:
-            if task in (Task.LEAD_RESEARCH, Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
-                instructions.append("Attribute submitted lead numbers to user input, never to the company or a source.")
-            if task == Task.LEAD_PREDICTION:
-                instructions.append(
-                    "Provide evidence and ratings only for travel. Do not select company scale, calculate "
-                    "weighted scores, or state a final travel level. The backend supplies those fields."
-                )
-            if task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
-                instructions.append(
-                    "Propose a tier change only to a key in permissible_targets. Cite its qualifying "
-                    "evidence. Keep a separate rationale for the business justification. The backend owns "
-                    "eligibility, tier alignment, and actionability. If no change is permissible, choose retain "
-                    "or undetermined under the policy and explain verification follow-up."
-                )
         if task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
             instructions.append(
                 "For supporting_evidence, copy only exact identifiers from allowed_supporting_evidence "
@@ -335,7 +299,7 @@ class PromptRenderer:
             "research_evidence": evidence_bytes,
             "other_task_input": len(input_json.encode()) - evidence_bytes,
         }
-        return RenderedPrompt(task, instruction_text, input_json, settings, context, options, use_revised, {
+        return RenderedPrompt(task, instruction_text, input_json, settings, context, options, {
             "policy_sha256": digest(policy) if task != Task.CHAT else None,
             "prompt_sha256": template_checksums, "context_utf8_bytes": sizes,
         })

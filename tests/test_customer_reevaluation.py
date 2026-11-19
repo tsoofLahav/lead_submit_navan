@@ -44,7 +44,7 @@ def response(data):
 
 def assessment(confidence="medium"):
     return {
-        "confidence": confidence, "findings": [{
+        "confidence": confidence, "material_eligibility_uncertainty": False, "findings": [{
             "evidence": ["annualized_gbv", "employee_count"], "interpretation": "Assess the submitted activity.",
         }],
         "rationale": "Based on the user-reported snapshot.", "information_gaps": ["Monthly stability is unknown."],
@@ -174,7 +174,7 @@ def test_triggered_retain_keeps_adoption_caveat(sessions, workspace_ids):
     (UPGRADE, [response(assessment()), response(recommendation(confidence="high")), response(recommendation(confidence="high"))],
      CustomerStage.RECOMMENDATION, "recommendation.snapshot_high_confidence"),
     (DOWNGRADE, [response(assessment()), response(recommendation("downgrade", 3)), response(recommendation("downgrade", 3))],
-     CustomerStage.RECOMMENDATION, "recommendation.adoption_rule_unset"),
+     CustomerStage.RECOMMENDATION, "recommendation.qualifying_evidence"),
 ])
 def test_technical_or_invalid_output_keeps_activity(sessions, workspace_ids, activity, batches, stage, rule):
     store_reference_data(sessions)
@@ -242,3 +242,77 @@ def test_stale_activity_or_tier_is_rejected(sessions, workspace_ids, mutate_duri
     with pytest.raises(CustomerWorkflowFailure, match=f"stale_{change}"):
         orchestrator.retry_customer_reevaluation(owner, failure.value.activity_id)
     assert counts(sessions)[2] == 0
+
+
+@pytest.mark.parametrize(("current", "gbv", "headcount", "adoption", "target", "decision"), [
+    (1, "100000", None, "unknown", 2, "accept"),
+    (1, "99999", 150, "declining", 2, "reject"),
+    (1, "99999", 149, "unknown", 3, "accept"),
+    (2, "99999", 149, "declining", 3, "stale"),
+])
+def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcount, adoption, target, decision):
+    from app.human_approval import RecommendationConflict
+    from scripts.smoke_revised_policy import seed_revised_policy
+
+    seed_revised_policy(sessions)
+    owner, _ = workspace_ids
+    value = replace(
+        EMPTY, months_since_signup=12, current_tier=current, total_gbv=Decimal(gbv),
+        employee_count=headcount, travel_spend_trend="decreasing",
+        product_adoption_trend="decreasing" if adoption == "declining" else "unknown",
+        avg_monthly_active_users=Decimal(1) if adoption == "declining" else None,
+    )
+    keys = ["annualized_gbv"] if Decimal(gbv) >= 100_000 else ["annualized_gbv", "employee_count"]
+    prediction = {**assessment(), "findings": [{"evidence": keys, "interpretation": "Current eligibility evidence."}]}
+    proposed = {**recommendation("downgrade", target), "supporting_evidence": keys}
+    client, requests = mock_client(response(prediction), response(proposed))
+    workflow = Orchestrator(sessions, ai_client=client)
+    result = workflow.submit_customer_reevaluation(owner, value)
+    assert result.approval_available and result.recommendation.recommended_tier == target
+    assert json.loads(requests[1]["input"][1]["content"])["permissible_targets"] == {str(target): keys}
+    assert len(requests) == 2 and all(not request["tools"] for request in requests)
+    approval = HumanApproval(sessions)
+    if decision == "stale":
+        workflow.submit_customer_activity(owner, value)
+        with pytest.raises(RecommendationConflict):
+            approval.accept(owner, result.evaluation_id)
+    else:
+        getattr(approval, decision)(owner, result.evaluation_id)
+    with sessions() as session:
+        row = session.get(Company, result.company_id)
+        assert row.current_tier == (target if decision == "accept" else current)
+        change = session.scalar(select(TierChange).where(TierChange.evaluation_id == result.evaluation_id))
+        if decision == "accept":
+            assert (change.previous_tier, change.new_tier) == (current, target)
+        else:
+            assert change is None
+
+
+@pytest.mark.parametrize(("changes", "confidence", "uncertain"), [
+    ({"total_gbv": None}, "medium", False),
+    ({"employee_count": None}, "medium", False),
+    ({"months_since_signup": 2}, "low", False),
+    ({}, "low", False),
+    ({}, "medium", True),
+])
+def test_final_blocked_downgrade_is_not_retain(changes, confidence, uncertain):
+    from app.ai.schemas import ActivityEvidence, ProductAssessmentOutput, RecommendationOutput
+    from app.reevaluation_gate import ReevaluationGate
+    from app.revised_policy import customer_targets
+    from app.validation import AIOutputValidationError, validate_recommendation
+
+    activity = replace(DOWNGRADE, **changes)
+    gate = ReevaluationGate.assess(activity)
+    observed = ProductAssessmentOutput(
+        confidence=confidence, material_eligibility_uncertainty=uncertain,
+        findings=[{"evidence": [ActivityEvidence.MONTHS], "interpretation": "Completed months."}],
+        rationale="Eligibility needs verification.", information_gaps=["Verify current eligibility."],
+    )
+    assert customer_targets(activity, observed) == {}
+    context = dict(current_tier=2, assessment=observed, activity=activity, metrics=gate.metrics, triggers=gate)
+    proposal = recommendation("retain", 2, "low")
+    proposal["supporting_evidence"] = []
+    with pytest.raises(AIOutputValidationError, match="Retain|retaining"):
+        validate_recommendation(RecommendationOutput(**proposal), **context)
+    proposal.update(outcome="undetermined", recommended_tier=None)
+    validate_recommendation(RecommendationOutput(**proposal), **context)

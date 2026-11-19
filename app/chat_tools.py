@@ -75,6 +75,10 @@ def _company(data: WorkspaceData, args: CompanySelector) -> dict:
     if isinstance(company, dict):
         return company
     return {"status": "ok", **_basic(company),
+            "submitted_data_provenance": (
+                "Stored company details may include submitted or prefilled sample data. "
+                "Independently sourced evidence is available separately in company research."
+            ),
             "submitted_annual_gbv": company.submitted_annual_gbv,
             "submitted_annual_gbv_currency": "USD" if company.submitted_annual_gbv is not None else None,
             "employee_count": company.employee_count}

@@ -68,6 +68,33 @@ responds to a connectivity check, or HTTP 503 with
 `{"status":"unavailable"}` when the database check fails. Missing or invalid
 database configuration stops application initialization.
 
+### Demo company templates
+
+Before opening the demo, the database owner should provision
+`public.demo_companies` and import the assignment's four sample rows
+(Gradient Labs, FintechOS, NextGen Cloud, and Valarian). Render already has
+this table. For a fresh local database, use the following schema:
+
+```sql
+CREATE TABLE public.demo_companies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    domain TEXT NOT NULL UNIQUE,
+    submitted_annual_gbv NUMERIC(15,2) NOT NULL,
+    employee_count INTEGER,
+    current_tier INTEGER NOT NULL CHECK (current_tier >= 1 AND current_tier <= 3)
+);
+```
+
+The runtime database role needs `SELECT` on this table. Keep template writes
+with the database owner or setup role. Each new workspace copies the templates
+as regular customers with new IDs and the sample tiers, in the workspace
+creation transaction. Existing workspaces keep their records as-is. The
+sample figures are submitted data and initialization creates no research,
+activity, evaluation or tier-change history. An empty template table
+produces an empty workspace, so check that the four source rows are present
+before opening the demo.
+
 ## Gunicorn
 
 Install `requirements.txt` for a runtime-only environment. Gunicorn uses the
@@ -129,7 +156,7 @@ HttpOnly and SameSite=Lax. It is Secure by default on Render. Set
 HTTP development.
 
 - `resolve_workspace()` validates the signed cookie's workspace against the
-  database and creates one when needed. Call it in a Flask request and pass its
+  database and creates and seeds one when needed. Call it in a Flask request and pass its
   returned ID to the business operations.
 - `WorkspaceData` scopes company lookup and direct retrieval of companies,
   research, activity, evaluations, tier changes, conversations and messages.
@@ -476,24 +503,23 @@ The browser shows a correction progress event without exposing diagnostics.
 Server logs and execution metadata record the initial rule, correction
 outcome, and added latency.
 
-## Revised business policy
+## Final business policy
 
-The approved 19 November 2026 policy and matching prompts are in
-`seeds/business_prediction_policy.txt` and `seeds/prompts/`. The workflow
-uses the stored policy snapshot. Its revision header selects the scoped
-research and backend-owned calculation path. Apply the matching prompt seeds
-with the revised policy. The renderer uses stored prompt wording directly
-and fills in the task placeholders. No database migration is needed.
-Stored research and evaluations remain readable.
+The final 19 November 2026 policy and eight matching prompt seeds are in
+`seeds/business_prediction_policy.txt` and `seeds/prompts/`. Before deploying
+this implementation, ensure the active `business_policy` row and all eight
+`prompts` rows match these files. The workflows load the stored text directly.
+The final six-signal outputs use the existing JSONB columns. Older research
+records may still show the earlier signals in history. No data cleanup or
+schema migration is required for the policy change.
 
-The revised path isolates unsupported observations and records the resulting
-gaps. Structural coverage and provenance remain hard requirements. Research
-correction collects independent signal diagnostics where possible and cannot
-add claims, scope, sources, or publication dates. Python determines employee
-scale from evidence applicable to the evaluated population, admits and
-scores travel ratings, and provides permissible recommendation targets.
-Research can support lead eligibility without rewriting submitted headcount.
-Human approval still governs tier changes, and customer downgrades are disabled.
+The backend computes travel scale, coverage, weighted intensity and eligible
+tier targets. One admitted core travel signal can support a provisional
+prediction. Customer downgrades require at least three completed months,
+known qualifying eligibility inputs and Medium confidence without material
+eligibility uncertainty. Adoption remains contextual. Activity metrics such as
+total GBV and average monthly bookings may be left blank as unknown. Both directions
+require explicit approval and the existing freshness checks.
 
 Run the revised tests and optional live smoke cases with isolated local PostgreSQL:
 

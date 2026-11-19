@@ -237,13 +237,9 @@ def _failure_kind(error: Exception) -> FailureKind:
 def _validate(prompt: RenderedPrompt, output: BaseModel) -> BaseModel:
     data = prompt.context
     if prompt.task == Task.LEAD_RESEARCH:
-        if prompt.revised:
-            return revised_policy.normalize_research(output)
-        validation.validate_research(output)
+        return revised_policy.normalize_research(output)
     elif prompt.task == Task.LEAD_PREDICTION:
-        if prompt.revised:
-            return revised_policy.compute_predictions(output, data["validated_research_findings"])
-        validation.validate_lead_prediction(output, data["validated_research_findings"])
+        return revised_policy.compute_predictions(output, data["validated_research_findings"])
     elif prompt.task == Task.LEAD_RECOMMENDATION:
         validation.validate_recommendation(
             output, current_tier=data["current_tier"], assessment=data["validated_predictions"],
@@ -260,7 +256,7 @@ def _validate(prompt: RenderedPrompt, output: BaseModel) -> BaseModel:
             activity=data["validated_product_data"], metrics=data["derived_metrics"], triggers=data["trigger_results"],
             permissible_targets=data.get("permissible_targets"),
         )
-    if prompt.revised and prompt.task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
+    if prompt.task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
         return ComputedRecommendation(**output.model_dump(), tier_alignment=data.get("tier_alignment"))
     return output
 

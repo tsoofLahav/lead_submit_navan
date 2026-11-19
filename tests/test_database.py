@@ -191,7 +191,7 @@ def test_stored_ai_prompts_render_through_shared_renderer(connection):
         (Task.REEVALUATION_PREDICTION, Component.PREDICTION, observation),
         (Task.REEVALUATION_RECOMMENDATION, Component.DECISION,
          {**observation, "current_tier": 3, "validated_product_assessment": ProductAssessmentOutput(
-             confidence="insufficient", findings=[], rationale="No evidence.", information_gaps=["Activity data unavailable."])}),
+             confidence="insufficient", material_eligibility_uncertainty=False, findings=[], rationale="No evidence.", information_gaps=["Activity data unavailable."])}),
         (Task.CHAT, Component.CHAT, {"message": "Synthetic message."}),
     ]
     with Session(connection) as session:

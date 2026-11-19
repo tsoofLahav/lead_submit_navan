@@ -28,11 +28,11 @@ LEAD = LeadInput("Demo", "demo.test", Decimal("60000"))
 
 def evidence(value, *, lower=None, upper=None, scope="evaluated_population", treatment="usable",
              reliability="high", as_of="2026-01-01", approximation=False, sourced=True, direction=None,
-             key=None, period=None, replacement=None):
+             key=None, period=None, replacement=None, evidence_type="direct"):
     bounds = EmployeeBounds(lower=lower, upper=upper, scope=scope, basis="employees",
                             as_of=as_of, submitted_count_resolution=replacement) if lower is not None or upper is not None else None
     return ScopedSignalEvidence(
-        value=value, estimated_range=None, reliability=reliability, evidence_type="direct", context="Source context.",
+        value=value, estimated_range=None, reliability=reliability, evidence_type=evidence_type, context="Source context.",
         sources=[ResearchSource(url="https://example.test/source", title=None, publication_date=None)] if sourced else [],
         applicable=True, approximation=approximation, treatment=treatment, employee_bounds=bounds,
         observation_key=key, observation_period=period, growth_direction=direction,
@@ -57,9 +57,9 @@ def prediction(level="unknown", confidence="insufficient", refs=None):
 
 
 def draft(*, extra=False, growth=None, support=None):
-    axes = [Signal.SALES, Signal.CUSTOMER_FACING]
+    axes = [Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY]
     if extra:
-        axes.append(Signal.INTERNAL_COLLABORATION)
+        axes.append(Signal.EVENTS)
     return LeadAssessmentOutput(
         travel_spend_potential=TravelAssessment(
             supporting_signals=[Signal.COMPANY_SIZE, *axes], rationale="Travel demand reflects the referenced ratings.",
@@ -95,26 +95,26 @@ def test_scope_bands_and_stronger_recent_evidence(observations, expected):
 def test_sourced_approximation_and_isolated_exclusion_preserve_other_findings():
     result = policy.normalize_research(research(
         [evidence(600, lower=600, upper=600, approximation=True), evidence(800, sourced=False)],
-        sales_and_account_management=[evidence("Regional enterprise sales")],
-        hiring_activity=[evidence("Unsourced job count", sourced=False)],
+        external_business_activity=[evidence("Regional enterprise sales")],
+        corporate_events=[evidence("Unsourced job count", sourced=False)],
     ))
     rows = {item.signal: item for item in result.signals}
     assert rows[Signal.COMPANY_SIZE].status == "estimated"
     assert len(rows[Signal.COMPANY_SIZE].evidence) == 1 and "excluded" in rows[Signal.COMPANY_SIZE].information_gap
-    assert rows[Signal.SALES].evidence[0].value == "Regional enterprise sales"
-    assert rows[Signal.HIRING].status == "missing" and rows[Signal.HIRING].evidence == []
-    assert rows[Signal.HIRING].information_gap
+    assert rows[Signal.EXTERNAL_ACTIVITY].evidence[0].value == "Regional enterprise sales"
+    assert rows[Signal.EVENTS].status == "missing" and rows[Signal.EVENTS].evidence == []
+    assert rows[Signal.EVENTS].information_gap
 
 
 def test_python_owns_scale_and_low_quality_ratings_do_not_change_score():
     data = research(
-        [evidence(300, lower=300, upper=300)], sales_and_account_management=[evidence("Sales team")],
-        customer_facing_operations=[evidence("On-site training")],
-        internal_collaboration=[evidence("Offsites suspected", reliability="low")],
+        [evidence(300, lower=300, upper=300)], external_business_activity=[evidence("Sales team")],
+        geographic_distribution=[evidence("On-site training")],
+        corporate_events=[evidence("Offsites suspected", reliability="low")],
     )
     proposed = draft(extra=True)
     result = policy.compute_predictions(proposed, data).travel_spend_potential
-    assert (result.company_scale, result.level, result.admitted_weight, result.weighted_score) == ("large", "medium", 6, "0.5")
+    assert (result.company_scale, result.level, result.admitted_weight, result.weighted_score) == ("large", "medium", 4, "0.5")
     payload = proposed.model_dump(mode="json")
     payload["travel_spend_potential"].update(company_scale="very_large", level="very_high")
     with pytest.raises(ValidationError):
@@ -124,26 +124,26 @@ def test_python_owns_scale_and_low_quality_ratings_do_not_change_score():
 def test_independent_predictions_and_directional_evidence():
     data = research(
         [evidence(480, lower=480, upper=480), evidence(550, lower=550, upper=550)],
-        business_growth=[evidence("Revenue rose", direction="increasing")],
+        business_growth_and_expansion=[evidence("Revenue rose", direction="increasing")],
         operational_complexity=[evidence("Separate billing entities")],
-        industry_and_work_model=[evidence("Remote work with multiple regions")],
+        geographic_distribution=[evidence("Remote work with multiple regions")],
     )
     assessment = draft(growth=prediction("high", "high", [Signal.GROWTH]),
-                       support=prediction("high", "high", [Signal.COMPLEXITY, Signal.INDUSTRY]))
+                       support=prediction("high", "high", [Signal.COMPLEXITY, Signal.GEOGRAPHY]))
     result = policy.compute_predictions(assessment, data)
     assert result.travel_spend_potential.level == "unknown"
     assert result.growth_potential.level == result.expected_support_needs.level == "high"
 
-    mismatched = research([], hiring_activity=[evidence("Hiring up", direction="increasing", period="2026", key="1")],
-                          funding=[evidence("Funding down", direction="decreasing", period="2026", key="2")])
-    result = policy.compute_predictions(draft(growth=prediction("medium", "medium", [Signal.HIRING, Signal.FUNDING])), mismatched)
+    mismatched = research([], external_business_activity=[evidence("Hiring up", direction="increasing", period="2026", key="1")],
+                          geographic_distribution=[evidence("Regional offices closed", direction="decreasing", period="2026", key="2")])
+    result = policy.compute_predictions(draft(growth=prediction("medium", "medium", [Signal.EXTERNAL_ACTIVITY, Signal.GEOGRAPHY])), mismatched)
     assert result.growth_potential.level == "unknown"
 
 
 def test_eligibility_requires_scoped_supported_bounds_and_preserves_input():
     def evaluate(rows):
-        data = research(rows, sales_and_account_management=[evidence("Regional sales")],
-                        customer_facing_operations=[evidence("Regular client visits")])
+        data = research(rows, external_business_activity=[evidence("Regional sales")],
+                        geographic_distribution=[evidence("Regular client visits")])
         proposed = draft()
         proposed.travel_spend_potential.intensity_ratings[0].rating = 2
         proposed.travel_spend_potential.intensity_ratings[1].rating = 2
@@ -157,7 +157,7 @@ def test_eligibility_requires_scoped_supported_bounds_and_preserves_input():
     activity = CustomerActivityInput("Demo", "demo.test", 3, 6, employee_count=220)
     assert policy.customer_targets(activity, None) == {2: ["employee_count"]}
     assert policy.customer_targets(activity, ProductAssessmentOutput(
-        confidence="low", findings=[], rationale="Sparse", information_gaps=["Missing GBV"],
+        confidence="low", material_eligibility_uncertainty=False, findings=[], rationale="Sparse", information_gaps=["Missing GBV"],
     )) == {}
 
 
@@ -216,7 +216,7 @@ def test_research_renderer_preserves_revised_schema_for_both_policy_editions(pre
         settings=AISettings.from_env(Component.RESEARCH),
     )
     assert rendered.output_schema is ScopedResearchOutput
-    assert "TARGETED RESEARCH INSTRUCTIONS" in rendered.instructions
+    assert "two or three focused searches" in rendered.instructions
 
 
 @pytest.mark.write_integration
@@ -224,8 +224,8 @@ def test_research_renderer_preserves_revised_schema_for_both_policy_editions(pre
 def test_revised_research_eligibility_persists_pending_and_preserves_approval(sessions, workspace_ids, external_update):
     seed_revised_policy(sessions)
     owner, _ = workspace_ids
-    data = research([evidence(220, lower=220, upper=220)], sales_and_account_management=[evidence("Regional sales")],
-                    customer_facing_operations=[evidence("Regular on-site visits")])
+    data = research([evidence(220, lower=220, upper=220)], external_business_activity=[evidence("Regional sales")],
+                    geographic_distribution=[evidence("Regular on-site visits")])
     proposed = draft()
     for rating in proposed.travel_spend_potential.intensity_ratings:
         rating.rating = 2
@@ -267,7 +267,7 @@ def test_normalization_collects_independent_unresolved_provenance_errors():
 
     data = research(
         [with_conflicting_source_metadata("Unknown employee bounds")],
-        sales_and_account_management=[with_conflicting_source_metadata("Regional account team")],
+        external_business_activity=[with_conflicting_source_metadata("Regional account team")],
     )
     with pytest.raises(validation.AIOutputValidationError) as caught:
         policy.normalize_research(data)
@@ -282,7 +282,7 @@ def test_revised_customer_qualifying_snapshot_key_is_available_even_if_assessmen
     seed_revised_policy(sessions)
     owner, _ = workspace_ids
     assessment = ProductAssessmentOutput(
-        confidence="medium", findings=[{"evidence": [ActivityEvidence.MONTHS], "interpretation": "Six completed months."}],
+        confidence="medium", material_eligibility_uncertainty=False, findings=[{"evidence": [ActivityEvidence.MONTHS], "interpretation": "Six completed months."}],
         rationale="The recorded activity covers six completed months.", information_gaps=["Annual GBV is unverified."],
     )
     decision = RecommendationOutput(
@@ -314,3 +314,32 @@ def test_scoped_research_correction_cannot_invent_headcount_or_publication_date(
     corrected.signals[0].evidence[0].sources[0].publication_date = "2026-01-01"
     with pytest.raises(validation.AIOutputValidationError, match="preserve the original claim"):
         _check_scoped_research_correction(original, corrected)
+
+
+@pytest.mark.parametrize(("signals", "expected"), [
+    ({"external_business_activity": [evidence("On-site enterprise deployments", evidence_type="indirect")]},
+     ("medium", "medium", 2, "0")),
+    ({"external_business_activity": [evidence("On-site customer operations", evidence_type="indirect")],
+      "geographic_distribution": [evidence("Teams work across three countries", evidence_type="indirect")]},
+     ("medium", "high", 4, "0.5")),
+    ({"corporate_events": [evidence("Annual corporate gatherings")]},
+     ("unknown", "insufficient", 1, None)),
+])
+def test_final_travel_admits_qualitative_proxies_and_applies_core_minimum(signals, expected):
+    data = research([evidence(300, lower=300, upper=300)], **signals)
+    normalized = policy.normalize_research(data)
+    assert len(normalized.signals) == 6
+    assert {row.signal for row in normalized.signals} == set(Signal)
+    assert all(not row.evidence and row.information_gap for row in normalized.signals if row.status == "missing")
+    travel = policy.compute_predictions(draft(extra=True), normalized).travel_spend_potential
+    assert (travel.level, travel.confidence, travel.admitted_weight, travel.weighted_score) == expected
+
+
+def test_final_travel_conflict_caps_high_and_events_enter_weighted_average():
+    data = research(
+        [evidence(600, lower=600, upper=600)],
+        external_business_activity=[evidence("Client visits"), evidence("Remote-only service", treatment="unresolved")],
+        geographic_distribution=[evidence("Global offices")], corporate_events=[evidence("Annual conference")],
+    )
+    travel = policy.compute_predictions(draft(extra=True), data).travel_spend_potential
+    assert (travel.admitted_weight, travel.weighted_score, travel.confidence) == (5, "0.8", "medium")

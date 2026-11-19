@@ -1,5 +1,6 @@
 import json
 from threading import Event
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -7,9 +8,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app import create_app
 from app.chat import ChatAssistant
-from app.models import Company, Evaluation, ProductActivity
+from app.chat_tools import build_chat_tools
+from app.ai.config import Component
+from app.models import Company, CompanyResearch, DemoCompany, Evaluation, ProductActivity, TierChange
 from app.orchestrator import Orchestrator
-from test_ai import message as response_message, mock_client, terminal
+from test_ai import message as response_message, mock_client, scoped_evidence, terminal
 from test_chat import call, final, references
 from test_customer_reevaluation import assessment, recommendation
 from test_lead_submission import decision_data, prediction_data, research_data, response as lead_response
@@ -229,10 +232,9 @@ def test_research_failure_logs_safe_diagnostic_and_retry_creates_no_duplicate(
 ):
     monkeypatch.setenv("AI_DIAGNOSTICS_REPORT_DIR", str(tmp_path))
     invalid = research_data()
-    invalid["signals"][0].update(status="found", evidence=[{
-        "value": "private unsourced observation", "estimated_range": None, "sources": [],
-        "reliability": "high", "evidence_type": "direct", "context": "private customer context",
-    }])
+    invalid["signals"][0].update(status="missing", evidence=[scoped_evidence(
+        "private unsourced observation", context="private customer context",
+    )])
     bad = lead_response(invalid, research=True)
     business, requests = mock_client(
         bad, lead_response(invalid), bad, lead_response(invalid), lead_response(research_data(), research=True),
@@ -252,7 +254,7 @@ def test_research_failure_logs_safe_diagnostic_and_retry_creates_no_duplicate(
     rows = client.get(path).json["messages"]
     assert rows[-1]["metadata"]["retried_failure_id"] == rows[1]["id"]
     assert rows[-1]["metadata"]["company_id"] == rows[1]["metadata"]["company_id"]
-    assert "research.unsourced_evidence" not in json.dumps({"sse": updates, "messages": rows})
+    assert "research.missing_evidence" not in json.dumps({"sse": updates, "messages": rows})
 
     records = [json.loads(record.getMessage().split(": ", 1)[1]) for record in caplog.records
                if record.getMessage().startswith("Stream operation failed: ")]
@@ -262,11 +264,11 @@ def test_research_failure_logs_safe_diagnostic_and_retry_creates_no_duplicate(
         assert record["stage"] == "research" and record["reason"] == "validation"
         assert record["cause"] == "AIExecutionError"
         assert record["underlying_exception"] == "AIOutputValidationError"
-        assert record["validation"]["rule_id"] == "research.unsourced_evidence"
-        assert record["validation"]["field_path"] == "signals[0].evidence[0].sources"
-        assert record["validation"]["observed"] == {"count": 0, "evidence_type": "direct", "context_present": True}
+        assert record["validation"]["rule_id"] == "research.missing_evidence"
+        assert record["validation"]["field_path"] == "signals[0].evidence"
+        assert record["validation"]["observed"] == {"count": 1}
     assert "private unsourced observation" not in caplog.text and "private customer context" not in caplog.text
-    evidence_schema = requests[0]["text"]["format"]["schema"]["$defs"]["SignalEvidence"]
+    evidence_schema = requests[0]["text"]["format"]["schema"]["$defs"]["ScopedSignalEvidence"]
     assert "at least one actual supporting source" in evidence_schema["properties"]["sources"]["description"]
 
     latest_failure = {"kind": "workflow", "message_id": rows[-1]["id"]}
@@ -300,3 +302,72 @@ def test_research_failure_logs_safe_diagnostic_and_retry_creates_no_duplicate(
     assert not first["correction"] and first["hosted_tool_limit"] == 5
     assert correction["correction"] and correction["hosted_tool_limit"] == 0
     assert correction["correction_context_utf8_bytes"] > 0
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_demo_company_copies_are_interactive_and_isolated(web, sessions, references, accept):
+    examples = {
+        "Gradient Labs": "gradient-labs.test", "FintechOS": "fintechos.test",
+        "NextGen Cloud": "nextgen-cloud.test", "Valarian": "valarian.test",
+    }
+    with sessions.begin() as session:
+        session.add_all(DemoCompany(
+            name=name, domain=domain, submitted_annual_gbv=100_000, employee_count=100, current_tier=3,
+        ) for name, domain in examples.items())
+    business, requests = mock_client([terminal([response_message(json.dumps(assessment()))])],
+                                     [terminal([response_message(json.dumps(recommendation()))])])
+    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
+        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    )
+    visitor, outsider = web.test_client(), web.test_client()
+
+    def companies(client):
+        return {row["name"]: row for row in client.get("/api/companies").json["companies"]}
+
+    first, second = companies(visitor), companies(outsider)
+    assert first.keys() == second.keys() == examples.keys()
+    assert {row["id"] for row in first.values()}.isdisjoint(row["id"] for row in second.values())
+    assert companies(visitor) == first
+    assert not requests
+    with sessions() as session:
+        template_ids = set(session.scalars(select(DemoCompany.id)))
+        copies = list(session.scalars(select(Company)))
+        assert len(copies) == 8
+        assert all(
+            row.id not in template_ids and row.is_customer and row.submitted_annual_gbv == 100_000
+            and row.employee_count == 100 and row.domain == examples[row.name]
+            for row in copies
+        )
+        for model in (CompanyResearch, ProductActivity, Evaluation, TierChange):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+        workspace_id = session.get(Company, UUID(first["Gradient Labs"]["id"])).workspace_id
+
+    tools = build_chat_tools(sessions, sessions)
+    selector = json.dumps({"company_id": first["Gradient Labs"]["id"], "company_name": None})
+    details = json.loads(tools.dispatch(Component.CHAT, workspace_id, "get_company", selector))
+    assert details["submitted_annual_gbv"] == "100000.00" and "sample data" in details["submitted_data_provenance"]
+
+    path = thread(visitor)
+    snapshot = payload("Gradient Labs", company_domain=examples["Gradient Labs"],
+                       total_gbv="360000", employee_count=220)
+    last = frames(post(visitor, path + "/customer-activity", snapshot))[-1]
+    assert last[0] == "result"
+    metadata = last[1]["message"]["metadata"]
+    assert metadata["company_id"] == first["Gradient Labs"]["id"]
+    assert metadata["result"]["gate"]["status"] == "TRIGGERED"
+    decision = f'{path}/evaluations/{metadata["evaluation_id"]}/decision'
+    assert post(outsider, decision, {"accept": True}).status_code == 404
+    result = frames(post(visitor, decision, {"accept": accept}))[-1]
+    assert result[1]["message"]["metadata"]["status"] == ("accepted" if accept else "rejected")
+    after = companies(visitor)
+    assert len(after) == 4 and after["Gradient Labs"]["tier"] == (1 if accept else 3)
+    assert companies(outsider) == second
+    assert len(requests) == 2
+    with sessions() as session:
+        copy = session.get(Company, UUID(first["Gradient Labs"]["id"]))
+        template = session.scalar(select(DemoCompany).where(DemoCompany.name == "Gradient Labs"))
+        other = session.get(Company, UUID(second["Gradient Labs"]["id"]))
+        assert copy.employee_count == 220 and template.employee_count == other.employee_count == 100
+        assert template.current_tier == other.current_tier == 3
+        for model, expected in ((ProductActivity, 1), (Evaluation, 1), (TierChange, int(accept)), (CompanyResearch, 0)):
+            assert session.scalar(select(func.count()).select_from(model).where(model.company_id == copy.id)) == expected
