@@ -169,33 +169,24 @@ class PromptRenderer:
                 context["tier_alignment"] = revised_policy.tier_alignment(
                     predictions.travel_spend_potential.level, inputs["current_tier"],
                 )
-                context["permissible_targets"] = revised_policy.lead_targets(
+                data["forecast_suitability_targets"] = revised_policy.lead_targets(
                     inputs["company_profile"], inputs["current_tier"], research, predictions,
                 )
                 data["tier_alignment"] = context["tier_alignment"]
-                data["permissible_targets"] = context["permissible_targets"]
                 data["allowed_supporting_evidence"] = sorted(
                     lead_recommendation_evidence(predictions, research, inputs["company_profile"])
                 )
             elif task == Task.REEVALUATION_RECOMMENDATION:
                 assessment = inputs["validated_product_assessment"]
                 validate_product_assessment(assessment, activity, gate.metrics, gate)
-                evidence = product_recommendation_evidence(assessment)
-                context["permissible_targets"] = revised_policy.customer_targets(activity, assessment)
-                data["permissible_targets"] = context["permissible_targets"]
-                evidence |= {key for keys in context["permissible_targets"].values() for key in keys}
-                data["allowed_supporting_evidence"] = sorted(evidence)
+                data["allowed_supporting_evidence"] = sorted(product_recommendation_evidence(activity, gate.metrics))
         except AIOutputValidationError as error:
             raise PromptRenderError(str(error)) from None
 
         if task in (Task.LEAD_RESEARCH, Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
             data["submitted_data_provenance"] = "Entered by the user. No independent company attribution."
         if task in (Task.REEVALUATION_PREDICTION, Task.REEVALUATION_RECOMMENDATION):
-            data["eligible_tier_candidates"] = sorted(revised_policy.possible_eligible_tiers(
-                activity.total_gbv, activity.months_since_signup, activity.employee_count,
-            ))
-            if task == Task.REEVALUATION_PREDICTION:
-                data["permissible_targets"] = revised_policy.customer_targets(activity, None)
+            data["quantitative_tier_guidance"] = revised_policy.customer_tier_guidance(activity)
 
         if task in (Task.LEAD_PREDICTION, Task.LEAD_RECOMMENDATION):
             research_payload = inputs["validated_research_findings"].model_dump(mode="json", exclude_none=True)
@@ -256,7 +247,7 @@ class PromptRenderer:
             template_checksums[task.value] = digest(task_template)
             schema_instruction_bytes = len(slots[spec.schema_slot].encode()) * _PLACEHOLDER.findall(task_template).count(spec.schema_slot)
             required_slots = set(slots) - {
-                "submitted_data_provenance", "permissible_targets", "tier_alignment", "eligible_tier_candidates",
+                "submitted_data_provenance", "forecast_suitability_targets", "tier_alignment", "quantitative_tier_guidance",
             }
             if task == Task.LEAD_RECOMMENDATION:
                 # The stored template names the profile and predictions only.

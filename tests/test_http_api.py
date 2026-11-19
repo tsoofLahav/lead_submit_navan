@@ -387,3 +387,39 @@ def test_existing_workspace_gets_missing_demo_companies_on_list(web, sessions):
     assert {row["name"] for row in companies} == {"Gradient Labs", "Valarian"}
     assert {"name": "Gradient Labs", "id": existing_id, "tier": 1} in companies
     assert client.get("/api/companies").json["companies"] == companies
+
+
+@pytest.mark.parametrize(("values", "key", "tier", "outcome", "accept"), [
+    ({"current_tier": 2, "months_since_signup": 1, "total_gbv": "3000"},
+     "annualized_gbv", 3, "downgrade", True),
+    ({"current_tier": 2, "total_gbv": "0", "employee_count": 200},
+     "annualized_gbv", 3, "downgrade", False),
+    ({"avg_monthly_bookings": "1000", "total_gbv": None},
+     "avg_monthly_bookings", 2, "upgrade", True),
+])
+def test_v5_low_confidence_partial_or_conflicting_customer_changes_are_reviewable(
+    web, sessions, references, values, key, tier, outcome, accept,
+):
+    observed = {**assessment("medium"), "material_eligibility_uncertainty": True,
+                "findings": [{"evidence": [key], "interpretation": "Observed activity favors a different support model."}]}
+    proposed = {**recommendation(outcome, tier, "medium"), "supporting_evidence": [key],
+                "rationale": "Observed activity supports this tier. Other eligibility measurements remain uncertain or point to a different tier."}
+    business, requests = mock_client(
+        [terminal([response_message(json.dumps(observed))])],
+        [terminal([response_message(json.dumps(proposed))])],
+    )
+    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
+        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    )
+    client = web.test_client()
+    path = thread(client)
+    last = frames(post(client, path + "/customer-activity", payload("V5case", **values)))[-1]
+    assert last[0] == "result"
+    metadata = last[1]["message"]["metadata"]
+    assert metadata["decision_status"] == "pending" and metadata["approval_available"]
+    assert metadata["result"]["recommendation"]["confidence"] == "low"
+    assert metadata["result"]["recommendation"]["recommended_tier"] == tier
+    assert len(requests) == 2
+    decision = f'{path}/evaluations/{metadata["evaluation_id"]}/decision'
+    result = frames(post(client, decision, {"accept": accept}))[-1]
+    assert result[1]["message"]["metadata"]["status"] == ("accepted" if accept else "rejected")

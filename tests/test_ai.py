@@ -335,10 +335,7 @@ def test_snapshot_recommendation_is_eligible_and_mappable():
     assert fields["predictions"]["recommendation_evidence"]["outcome"] == "upgrade"
     assert json.loads(json.dumps(fields))["recommended_tier"] == 2
     assert not {"company_id", "decision_status", "decided_at"} & fields.keys()
-    with pytest.raises(AIOutputValidationError, match="tier target"):
-        validate_recommendation(decision.model_copy(update={"recommended_tier": 1}), **context)
-    with pytest.raises(AIOutputValidationError, match="high confidence"):
-        validate_recommendation(decision.model_copy(update={"confidence": "high"}), **context)
+    validate_recommendation(decision.model_copy(update={"recommended_tier": 1, "confidence": "low"}), **context)
     with pytest.raises(AIOutputValidationError, match="direction"):
         validate_recommendation(decision.model_copy(update={"outcome": "downgrade"}), **context)
     with pytest.raises(AIOutputValidationError, match="unavailable"):
@@ -384,7 +381,7 @@ def test_unknown_chat_function_stops_without_continuation(renderer):
     assert error.value.kind == FailureKind.TOOL_ERROR and len(requests) == 1
 
 
-def test_snapshot_downgrade_requires_eligibility_references_not_adoption():
+def test_snapshot_downgrade_does_not_require_all_eligibility_references():
     activity = CustomerActivityInput(
         "Acme", "example.com", 2, 12, total_gbv=Decimal(10_000), employee_count=20,
         avg_monthly_active_users=Decimal(18), travel_spend_trend="decreasing",
@@ -402,8 +399,7 @@ def test_snapshot_downgrade_requires_eligibility_references_not_adoption():
         follow_up_actions=[], information_gaps=[],
     )
     context = dict(current_tier=2, assessment=assessment, activity=activity, metrics=gate.metrics, triggers=gate)
-    with pytest.raises(AIOutputValidationError, match="qualifying"):
-        validate_recommendation(decision, **context)
+    validate_recommendation(decision, **context)
     validate_recommendation(decision.model_copy(update={
         "supporting_evidence": ["annualized_gbv", "employee_count"],
     }), **context)
@@ -434,7 +430,7 @@ def test_smoke_diagnostics_preserve_rule_safe_value_usage_and_phases(renderer, c
     assert error.value.kind == FailureKind.VALIDATION and len(requests) == 1
     assert metadata.validation_passed is False
     diagnostic = metadata.validation_diagnostic
-    assert (diagnostic.rule_id, diagnostic.policy_section, diagnostic.field_path) == ("research.signal_coverage", "2.1", "signals")
+    assert (diagnostic.rule_id, diagnostic.policy_section, diagnostic.field_path) == ("research.signal_coverage", "3.1", "signals")
     assert metadata.usage.cached_input_tokens == 4
     assert metadata.usage.reasoning_output_tokens == 12
     phases = metadata.phases

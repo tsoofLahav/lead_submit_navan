@@ -1,8 +1,8 @@
-1. Assess total GBV since signup, annualized GBV, average monthly bookings, current employee count, estimated adoption and monthly support demand using the validated snapshot and backend-calculated metrics (§6.1). Preserve their units, observation periods and limitations.
-2. Assess the reported company size, adoption and travel spend trends separately (§6.1). Do not infer numerical growth rates, monthly stability or sustained trends from summary data.
-3. Interpret the backend-calculated business indicators (§6.2), observation duration, inconsistencies and material information gaps (§6.4). No active indicators is valid. Low or zero volume alone does not reduce confidence in a coherent, sufficiently long snapshot.
-4. Return findings and supporting metric references using the supplied schema. Treat backend-identifiable tier targets as eligibility context only. Adoption is contextual for support and follow-up, not a requirement or independent blocker for downgrade. Do not recalculate or substitute the metrics, invent missing data or issue a recommendation.
-5. Follow §5.4: keep the assessment rationale to approximately 30 words and avoid repeated metric descriptions; preserve material limitations.
+1. Assess validated snapshot and backend-derived annualized GBV, bookings, headcount, adoption and support metrics under Section 4.1. Preserve units, observation periods and limitations; do not recalculate or invent values.
+2. Interpret reported size, adoption and spend trends separately. Unknown is not stable; do not infer monthly stability, numeric growth or verified persistence from summaries.
+3. Interpret contextual indicators (Section 4.2), duration, inconsistencies and gaps. No active indicators is valid. Low or zero volume alone does not lower confidence in coherent sufficiently long activity. Optional missing inputs affect only dependent findings.
+4. Assess observed business suitability using available measurements and quantitative criteria as guidance. Missing headcount limits threshold certainty without invalidating observed spending evidence. Backend-identifiable eligible targets are context, not restrictions on assessment, recommendation or approval. Adoption is contextual, not a downgrade condition.
+5. Return findings, confidence under Section 4.4 and supporting metric references using the supplied schema; do not issue a recommendation. Keep rationale normally within 30 words and preserve material limitations.
 
 Inputs: {{validated_product_data}}, {{derived_metrics}}, {{trigger_results}}
 Output schema: {{product_assessment_schema}}

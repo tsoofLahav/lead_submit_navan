@@ -141,7 +141,8 @@ def test_upgrade_context_persistence_and_human_decision(sessions, workspace_ids,
         assert Decimal(data["derived_metrics"]["annualized_gbv"]) == Decimal("720000")
         assert "potential_tier_mismatch" in data["trigger_results"]["business_indicators"]
     assert "Reserve the recommendation outcome" in requests[0]["input"][0]["content"]
-    assert json.loads(requests[1]["input"][1]["content"])["allowed_supporting_evidence"] == ["annualized_gbv", "employee_count"]
+    citations = json.loads(requests[1]["input"][1]["content"])["allowed_supporting_evidence"]
+    assert {"annualized_gbv", "employee_count", "avg_monthly_bookings"} <= set(citations)
     with sessions() as session:
         evaluation = session.get(Evaluation, result.evaluation_id)
         assert (evaluation.evaluation_type, evaluation.research_id, evaluation.decision_status) == ("re_evaluation", None, "pending")
@@ -175,10 +176,11 @@ def test_triggered_retain_keeps_adoption_caveat(sessions, workspace_ids):
 @pytest.mark.parametrize(("activity", "batches", "stage", "rule"), [
     (UPGRADE, [500], CustomerStage.PREDICTION, None),
     (UPGRADE, [response(assessment("high"))], CustomerStage.PREDICTION, None),
-    (UPGRADE, [response(assessment()), response(recommendation(confidence="high")), response(recommendation(confidence="high"))],
-     CustomerStage.RECOMMENDATION, "recommendation.snapshot_high_confidence"),
-    (DOWNGRADE, [response(assessment()), response(recommendation("downgrade", 3)), response(recommendation("downgrade", 3))],
-     CustomerStage.RECOMMENDATION, "recommendation.qualifying_evidence"),
+    (UPGRADE, [response(assessment()), response(recommendation("downgrade", 1)), response(recommendation("downgrade", 1))],
+     CustomerStage.RECOMMENDATION, "recommendation.direction"),
+    (DOWNGRADE, [response(assessment()), response({**recommendation("downgrade", 3), "supporting_evidence": ["fake_metric"]}),
+                 response({**recommendation("downgrade", 3), "supporting_evidence": ["fake_metric"]})],
+     CustomerStage.RECOMMENDATION, "recommendation.evidence_references"),
 ])
 def test_technical_or_invalid_output_keeps_activity(sessions, workspace_ids, activity, batches, stage, rule):
     store_reference_data(sessions)
@@ -273,7 +275,9 @@ def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcou
     workflow = Orchestrator(sessions, ai_client=client)
     result = workflow.submit_customer_reevaluation(owner, value)
     assert result.approval_available and result.recommendation.recommended_tier == target
-    assert json.loads(requests[1]["input"][1]["content"])["permissible_targets"] == {str(target): keys}
+    guidance = json.loads(requests[1]["input"][1]["content"])["quantitative_tier_guidance"]
+    assert guidance["indicative_run_rate_meets_tier_1_threshold"] is False
+    assert guidance["headcount_meets_tier_2_threshold"] == (None if headcount is None else headcount >= 150)
     assert len(requests) == 2 and all(not request["tools"] for request in requests)
     approval = HumanApproval(sessions)
     if decision == "stale":
@@ -292,33 +296,23 @@ def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcou
             assert change is None
 
 
-@pytest.mark.parametrize(("changes", "confidence", "uncertain"), [
-    ({"total_gbv": None}, "medium", False),
-    ({"employee_count": None}, "medium", False),
-    ({"months_since_signup": 2}, "low", False),
-    ({}, "low", False),
-    ({}, "medium", True),
-])
-def test_final_blocked_downgrade_is_not_retain(changes, confidence, uncertain):
+def test_undetermined_is_valid_with_no_business_evidence_but_retain_requires_support():
     from app.ai.schemas import ActivityEvidence, ProductAssessmentOutput, RecommendationOutput
     from app.reevaluation_gate import ReevaluationGate
-    from app.revised_policy import customer_targets
     from app.validation import AIOutputValidationError, validate_recommendation
 
-    activity = replace(DOWNGRADE, **changes)
+    activity = EMPTY
     gate = ReevaluationGate.assess(activity)
     observed = ProductAssessmentOutput(
-        confidence=confidence, material_eligibility_uncertainty=uncertain,
+        confidence="insufficient", material_eligibility_uncertainty=True,
         findings=[{"evidence": [ActivityEvidence.MONTHS], "interpretation": "Completed months."}],
-        rationale="Eligibility needs verification.", information_gaps=["Verify current eligibility."],
+        rationale="No informative activity measurements were supplied.", information_gaps=[],
     )
-    assert customer_targets(activity, observed) == {}
-    context = dict(current_tier=2, assessment=observed, activity=activity, metrics=gate.metrics, triggers=gate)
-    proposal = recommendation("retain", 2, "low")
-    proposal["supporting_evidence"] = []
-    with pytest.raises(AIOutputValidationError, match="Retain|retaining"):
+    context = dict(current_tier=3, assessment=observed, activity=activity, metrics=gate.metrics, triggers=gate)
+    proposal = {**recommendation("retain", 3, "low"), "supporting_evidence": ["months_since_signup"]}
+    with pytest.raises(AIOutputValidationError, match="tier preference requires"):
         validate_recommendation(RecommendationOutput(**proposal), **context)
-    proposal.update(outcome="undetermined", recommended_tier=None)
+    proposal.update(outcome="undetermined", recommended_tier=None, confidence="insufficient")
     validate_recommendation(RecommendationOutput(**proposal), **context)
 
 

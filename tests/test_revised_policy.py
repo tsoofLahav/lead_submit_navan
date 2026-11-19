@@ -155,10 +155,9 @@ def test_eligibility_requires_scoped_supported_bounds_and_preserves_input():
     assert 2 in evaluate([evidence(220, lower=220, upper=220, approximation=True)])
     assert LEAD.employee_count is None
     activity = CustomerActivityInput("Demo", "demo.test", 3, 6, employee_count=220)
-    assert policy.customer_targets(activity, None) == {2: ["employee_count"]}
-    assert policy.customer_targets(activity, ProductAssessmentOutput(
-        confidence="low", material_eligibility_uncertainty=False, findings=[], rationale="Sparse", information_gaps=["Missing GBV"],
-    )) == {}
+    guidance = policy.customer_tier_guidance(activity)
+    assert guidance["headcount_meets_tier_2_threshold"] is True
+    assert guidance["indicative_run_rate_meets_tier_1_threshold"] is None
 
 
 def test_revised_renderer_uses_seeded_prompt_verbatim_except_placeholders():
@@ -242,7 +241,7 @@ def test_revised_research_eligibility_persists_pending_and_preserves_approval(se
     orchestrator = Orchestrator(sessions, ai_client=client)
     result = orchestrator.submit_lead(owner, LEAD)
     assert result.initial_tier == result.current_tier == 3 and result.approval_available
-    assert json.loads(requests[2]["input"][1]["content"])["permissible_targets"] == {"1": ["travel_spend_potential"], "2": ["travel_spend_potential"]}
+    assert json.loads(requests[2]["input"][1]["content"])["forecast_suitability_targets"] == {"1": ["travel_spend_potential"], "2": ["travel_spend_potential"]}
     with sessions() as session:
         assert session.get(Company, result.company_id).employee_count is None
         persisted = session.get(Evaluation, result.evaluation_id)
@@ -298,8 +297,9 @@ def test_revised_customer_qualifying_snapshot_key_is_available_even_if_assessmen
     )
     assert result.approval_available and result.recommendation.recommended_tier == 2
     data = json.loads(requests[1]["input"][1]["content"])
-    assert data["eligible_tier_candidates"] == [1, 2]
-    assert data["permissible_targets"] == {"2": ["employee_count"]}
+    assert data["quantitative_tier_guidance"]["headcount_meets_tier_2_threshold"] is True
+    assert data["quantitative_tier_guidance"]["indicative_run_rate_meets_tier_1_threshold"] is None
+    assert "employee_count" in data["allowed_supporting_evidence"]
 
 
 def test_scoped_research_correction_cannot_invent_headcount_or_publication_date():

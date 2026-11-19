@@ -137,7 +137,7 @@ class RecommendationOutput(StructuredOutput):
     confidence: Confidence
     key_findings: list[str]
     supporting_evidence: list[str] = Field(
-        description="Use structured input keys for the cited evidence. For product assessments, use evidence keys cited by their findings."
+        description="Use structured input keys for the cited evidence. For customer recommendations, use known observations or derived metrics from the current activity snapshot."
     )
     rationale: str
     follow_up_actions: list[str]
@@ -146,7 +146,7 @@ class RecommendationOutput(StructuredOutput):
 
 class LeadRecommendationOutput(RecommendationOutput):
     material_suitability_uncertainty: bool = Field(
-        description="True if unresolved evidence materially undermines the proposed support-model fit. "
+        description="True if unresolved evidence materially weakens confidence in the forecast. "
         "Uncertain future GBV alone does not count."
     )
 

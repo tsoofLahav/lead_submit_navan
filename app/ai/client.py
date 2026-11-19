@@ -13,6 +13,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from .. import revised_policy, validation
+from ..tier_eligibility import MIN_GBV_MONTHS
 from .budget import HOSTED_INPUT_RESERVE, EvaluationBudget, estimate_cost_usd
 from .config import Component
 from .diagnostics import current_evaluation, digest, query_fingerprint
@@ -244,20 +245,34 @@ def _validate(prompt: RenderedPrompt, output: BaseModel) -> BaseModel:
         validation.validate_recommendation(
             output, current_tier=data["current_tier"], assessment=data["validated_predictions"],
             lead=data["company_profile"], research=data["validated_research_findings"],
-            permissible_targets=data.get("permissible_targets"),
         )
     elif prompt.task == Task.REEVALUATION_PREDICTION:
-        validation.validate_product_assessment(
-            output, data["validated_product_data"], data["derived_metrics"], data["trigger_results"],
-        )
+        activity = data["validated_product_data"]
+        validation.validate_product_assessment(output, activity, data["derived_metrics"], data["trigger_results"])
+        if output.confidence == "medium" and (
+            activity.months_since_signup < MIN_GBV_MONTHS or output.material_eligibility_uncertainty
+        ):
+            return output.model_copy(update={"confidence": "low"})
     elif prompt.task == Task.REEVALUATION_RECOMMENDATION:
         validation.validate_recommendation(
             output, current_tier=data["current_tier"], assessment=data["validated_product_assessment"],
             activity=data["validated_product_data"], metrics=data["derived_metrics"], triggers=data["trigger_results"],
-            permissible_targets=data.get("permissible_targets"),
         )
     if prompt.task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
-        return ComputedRecommendation(**output.model_dump(), tier_alignment=data.get("tier_alignment"))
+        fields = output.model_dump()
+        if output.outcome == "undetermined":
+            fields["confidence"] = "insufficient"
+        elif output.confidence == "insufficient":
+            fields["confidence"] = "low"
+        if prompt.task == Task.REEVALUATION_RECOMMENDATION and fields["confidence"] in {"high", "medium"}:
+            activity = data["validated_product_data"]
+            assessment = data["validated_product_assessment"]
+            fields["confidence"] = "low" if (
+                activity.months_since_signup < MIN_GBV_MONTHS or assessment.material_eligibility_uncertainty
+            ) else "medium"
+        if fields.get("material_suitability_uncertainty") and fields["confidence"] in {"high", "medium"}:
+            fields["confidence"] = "low"
+        return ComputedRecommendation(**fields, tier_alignment=data.get("tier_alignment"))
     return output
 
 
@@ -279,7 +294,7 @@ def _check_research_correction(original: ResearchOutput, corrected: ResearchOutp
                 if (item.signal, source.url) not in sources:
                     validation.require(
                         False, "Correction cannot add a new source for a signal.",
-                        "correction.new_source", "2.4",
+                        "correction.new_source", "2.1, 3.1",
                         f"signals[{index}].evidence[{evidence_index}].sources[{source_index}].url",
                         "source absent from original research for this signal",
                     )
@@ -305,7 +320,7 @@ def _check_scoped_research_correction(original: ScopedResearchOutput, corrected:
             validation.require(
                 any(preserves_claim(before, item) for before in observations.get(finding.signal, ())),
                 "Correction must preserve the original claim, scope and source dates.",
-                "correction.changed_provenance", "2.4, 4.1, 7",
+                "correction.changed_provenance", "2.1–2.2, 3.1, 6",
                 f"signals[{signal_index}].evidence[{evidence_index}]",
                 "claim, scope or source metadata absent from original observation",
             )

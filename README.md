@@ -500,9 +500,9 @@ The browser shows a correction progress event without exposing diagnostics.
 Server logs and execution metadata record the initial rule, correction
 outcome, and added latency.
 
-## Final business policy V3
+## Final business policy V5
 
-The final 19 November 2026 V3 policy and eight matching prompt seeds are in
+The final 19 November 2026 V5 policy and eight matching prompt seeds are in
 `seeds/business_prediction_policy.txt` and `seeds/prompts/`. Before deploying
 this implementation, ensure the active `business_policy` row and all eight
 `prompts` rows match these files. The workflows load the stored text directly.
@@ -511,13 +511,12 @@ records may still show the earlier signals in history. No data cleanup or
 schema migration is required for the policy change.
 
 Initial lead assignment still uses submitted GBV and headcount. Subsequent
-lead recommendations use forecast-based suitability and may be actionable at
-Medium or High confidence. Customer changes still require quantitative
-eligibility and sufficient tenure and confidence. Both require explicit
-approval. V3 permits optional customer metrics, including GBV and average
-bookings, to be recorded as unknown. The latest snapshot ID and policy
-checksum are stored in the existing evaluation JSONB. A pre-V3 evaluation
-with no policy checksum does not suppress the next equivalent submission.
+lead recommendations use forecast suitability. Customer assessment uses
+quantitative thresholds as guidance and explains uncertainty about missing
+or conflicting measurements. Supported changes remain pending for explicit
+approval at Low, Medium, or High confidence where applicable. V5 permits
+optional customer metrics to be recorded as unknown. The latest snapshot ID
+and policy checksum remain stored in the existing evaluation JSONB.
 
 Run the revised tests and optional live smoke cases with isolated local PostgreSQL:
 

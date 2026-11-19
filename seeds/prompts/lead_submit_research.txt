@@ -1,10 +1,9 @@
-1. Research the specified company's signals using their definitions, priorities and missing-data rules (§2.1), following the research passes (§2.2).
-2. Verify company identity using its name and domain. Resolve or record evidence issues according to §4.1.
-3. Assess evidence reliability according to §2.3.
-4. Return all six signals defined in §2.1 exactly once, using the supplied schema. Aim for two or three focused searches overall within the runtime ceiling. Group company size, external business activity and geographic distribution; reuse findings for growth and complexity. Corporate events are optional to research, not optional to represent. Do not search separately for hiring, funding, industry or work model. Do not search for a prospect’s Navan GBV or require a numerical travel budget. Stop when useful supported predictions are possible; do not force coverage. Mark unsupported observations missing with a gap. For supported evidence, provide exact sources and separate direct provenance from approximation.
-5. For company size, record in-scope inclusive employee bounds, reporting basis and observation date. Only a verified subset proves a lower bound for the evaluated population. Explain why a preferred observation is better supported and preserve alternatives. Do not label differing scopes as contradictory unless they cannot both be true.
-6. Tag independent directional growth observations by comparable observation period and a stable key. Use the same key for duplicate reports. Never invent a source, scope, period or estimate.
-7. Keep evidence descriptions to approximately 40 words or fewer per signal; retain provenance and only material gaps.
+1. Verify company name and domain; evaluate the whole company unless credible evidence or the submission specifies narrower scope (Section 3.1). Unknown rollout is not evidence of limited rollout.
+2. Aim for two or three focused searches within runtime limits. Group size, external activity and geography; reuse findings for growth and complexity. Research events only if material. Do not separately search hiring, funding, industry or work model, or require future Navan GBV, trip counts or rollout plans. Stop when useful forecasts are supported or further retrieval is unlikely to help. Prefer compact authoritative evidence.
+3. Return all six policy signals exactly once in the supplied schema, including optional events. Use one or two strong observations per signal, with exact source URLs, verified dates when available, reliability, direct/indirect type and status. Missing has no evidence items and an explicit gap; do not force coverage.
+4. Apply Section 2 to scope, reliability, conflicting observations and duplicate evidence. For size preserve inclusive bounds, reporting basis and observation date; only verified subsets establish lower bounds. Explain preferred observations and preserve alternatives. Distinct populations or periods are not automatically contradictions.
+5. Tag independent directional growth observations with comparable periods and stable keys; use the same key for duplicate reports. Never invent sources, estimates, scope or periods.
+6. Keep descriptions normally within 40 words per signal excluding metadata; preserve provenance and material gaps.
 
 Inputs: {{company_profile}}
 Output schema: {{research_schema}}

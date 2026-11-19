@@ -8,7 +8,7 @@ from .ai.schemas import (
     ComputedLeadPredictionOutput, ComputedTravelPrediction, LeadAssessmentOutput, ScopedResearchOutput,
     ScopedSignalEvidence, Signal,
 )
-from .tier_eligibility import MIN_GBV_MONTHS, TIER_1_GBV, TIER_2_EMPLOYEES, TIER_2_GBV, possible_eligible_tiers
+from .tier_eligibility import MIN_GBV_MONTHS, TIER_1_GBV, TIER_2_EMPLOYEES, TIER_2_GBV
 
 ISOLATABLE = {
     "research.value_or_range", "research.blank_value", "research.nonfinite_value",
@@ -183,7 +183,7 @@ def compute_predictions(
     def supported_references(item, field):
         validation.require(
             validation._nonempty(item.rationale), "Prediction must include a rationale.",
-            "prediction.rationale", "3.4", f"{field}.rationale", "blank",
+            "prediction.rationale", "3.5", f"{field}.rationale", "blank",
         )
         references = list(dict.fromkeys(item.supporting_signals))
         supported = [key for key in references if findings[key].evidence]
@@ -208,7 +208,7 @@ def compute_predictions(
             and rating.signal in travel.supporting_signals
             and all(0 <= pointer < len(evidence) for pointer in rating.evidence_indices),
             "Travel rating must reference distinct configured signals and valid evidence indices.",
-            "prediction.travel_rating_references", "3.1", f"travel_spend_potential.intensity_ratings[{index}]",
+            "prediction.travel_rating_references", "3.2", f"travel_spend_potential.intensity_ratings[{index}]",
             {"signal": rating.signal, "index_count": len(rating.evidence_indices)},
         )
         rating_signals.add(rating.signal)
@@ -296,11 +296,11 @@ def tier_alignment(level: str, tier: int) -> str:
 
 
 def lead_targets(lead, tier: int, research: ScopedResearchOutput, predictions) -> dict[int, list[str]]:
-    """Forecast-supported tier options and the required basis for each option."""
+    """Forecast suitability guidance for the model, independent of approval."""
     travel = predictions.travel_spend_potential
     growth = predictions.growth_potential
     support = predictions.expected_support_needs
-    sufficient = {"medium", "high"}
+    sufficient = {"low", "medium", "high"}
     basis = {
         "low": (3,), "medium": (2,), "high": (1, 2), "very_high": (1,),
     }
@@ -336,36 +336,17 @@ def lead_targets(lead, tier: int, research: ScopedResearchOutput, predictions) -
     return targets
 
 
-def customer_targets(activity, assessment) -> dict[int, list[str]]:
-    if activity.months_since_signup < MIN_GBV_MONTHS or (assessment is not None and (
-        assessment.confidence != "medium" or assessment.material_eligibility_uncertainty
-    )):
-        return {}
-    tier = max(possible_eligible_tiers(activity.total_gbv, activity.months_since_signup, activity.employee_count))
-    if tier > activity.current_tier:
-        # A lower tier must be established, without treating unknown inputs as below threshold.
-        gbv = activity.total_gbv
-        employees = activity.employee_count
-        if gbv is None:
-            return {}
-        annualized_numerator = 12 * gbv
-        if tier == 2 and annualized_numerator < TIER_1_GBV * activity.months_since_signup:
-            if annualized_numerator >= TIER_2_GBV * activity.months_since_signup:
-                return {2: ["annualized_gbv"]}
-            if employees is not None and employees >= TIER_2_EMPLOYEES:
-                return {2: ["annualized_gbv", "employee_count"]}
-        if (
-            tier == 3 and annualized_numerator < TIER_2_GBV * activity.months_since_signup
-            and employees is not None and employees < TIER_2_EMPLOYEES
-        ):
-            return {3: ["annualized_gbv", "employee_count"]}
-        return {}
-    if tier == activity.current_tier:
-        return {}
-    keys = []
-    threshold = TIER_1_GBV if tier == 1 else TIER_2_GBV
-    if activity.total_gbv is not None and 12 * activity.total_gbv >= threshold * activity.months_since_signup:
-        keys.append("annualized_gbv")
-    if tier == 2 and activity.employee_count is not None and activity.employee_count >= TIER_2_EMPLOYEES:
-        keys.append("employee_count")
-    return {tier: keys} if keys else {}
+def customer_tier_guidance(activity) -> dict:
+    """Describe the current measurements without resolving unknown thresholds."""
+    gbv = activity.total_gbv
+    months = activity.months_since_signup
+    headcount = activity.employee_count
+    tier_1_gbv = None if gbv is None else gbv * 12 >= TIER_1_GBV * months
+    tier_2_gbv = None if gbv is None else gbv * 12 >= TIER_2_GBV * months
+    tier_2_headcount = None if headcount is None else headcount >= TIER_2_EMPLOYEES
+    return {
+        "indicative_run_rate_meets_tier_1_threshold": tier_1_gbv,
+        "indicative_run_rate_meets_tier_2_threshold": tier_2_gbv,
+        "headcount_meets_tier_2_threshold": tier_2_headcount,
+        "short_observation_period": months < MIN_GBV_MONTHS,
+    }
