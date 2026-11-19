@@ -240,7 +240,7 @@ function drawThread(scroll = true) {
     const recover = create("button", error.retry ? "Retry" : "Refresh conversation");
     recover.disabled = isBusy(id) && Boolean(error.retry);
     recover.onclick = () => error.retry
-      ? run(id, progress => APIClient.retry(id, error.retry, progress))
+      ? run(id, progress => APIClient.retry(id, error.retry, progress), { chat: error.retry.kind === "chat" })
       : refresh(id).catch(showGlobalError);
     errorArea.append(recover);
   }
@@ -256,7 +256,7 @@ function drawThread(scroll = true) {
       if (!isBusy(id) && message.metadata?.kind === "chat" && !messages.some(row => row.metadata?.reply_to === message.id)
           && !error?.retry) {
         const retry = create("button", "Retry reply");
-        retry.onclick = () => run(id, progress => APIClient.retry(id, { kind: "chat", message_id: message.id }, progress));
+        retry.onclick = () => run(id, progress => APIClient.retry(id, { kind: "chat", message_id: message.id }, progress), { chat: true });
         bubble.append(document.createElement("br"), retry);
       }
       return bubble;
@@ -367,7 +367,6 @@ const stageEvents = {
   recommendation_started: ["recommendation", "Prepare tier recommendation", "running"],
   recommendation_completed: ["recommendation", "Prepare tier recommendation", "done"],
   evaluation_completed: ["evaluation", "Save evaluation", "done"],
-  chat_response_streaming: ["response", "Write response", "running"],
 };
 const committed = new Set(["company_registered", "customer_activity_persisted", "evaluation_completed"]);
 const stageStatus = { running: "In progress", done: "Complete", failed: "Failed", interrupted: "Not confirmed" };
@@ -429,7 +428,12 @@ function progressList(operation) {
 function operationProgress(operation) {
   const progress = create("div", "", "progress");
   progress.id = "operationProgress";
-  progress.append(create("p", "In progress", "progress-heading"), progressList(operation));
+  const heading = create("p", "In progress", "progress-heading");
+  const steps = progressList(operation);
+  heading.hidden = steps.hidden = Boolean(operation?.chat && !operation.stages.size);
+  progress.classList.toggle("progress", !steps.hidden);
+  progress.hidden = steps.hidden && !operation?.preview;
+  progress.append(heading, steps);
   const preview = create("div", operation?.preview || "", "bubble assistant");
   preview.id = "operationPreview";
   preview.hidden = !operation?.preview;
@@ -454,6 +458,11 @@ function updateProgress(id, operation, event) {
       if (operation.revision !== before) {
         current.querySelector(".progress-steps").replaceWith(progressList(operation));
       }
+      const showSteps = !operation.chat || operation.stages.size > 0;
+      current.querySelector(".progress-heading").hidden = !showSteps;
+      current.querySelector(".progress-steps").hidden = !showSteps;
+      current.classList.toggle("progress", showSteps);
+      current.hidden = !showSteps && !operation.preview;
       const preview = $("operationPreview");
       preview.textContent = operation.preview;
       preview.hidden = !operation.preview;
@@ -463,9 +472,9 @@ function updateProgress(id, operation, event) {
   if (committed.has(event.kind)) refresh(id).catch(() => {});
 }
 
-async function run(id, execute, { onProgress, onFailure } = {}) {
+async function run(id, execute, { onProgress, onFailure, chat = false } = {}) {
   if (!id || isBusy(id)) return;
-  const operation = { stages: new Map(), revision: 0, raw: "", preview: "", outcome: "" };
+  const operation = { stages: new Map(), revision: 0, raw: "", preview: "", outcome: "", chat };
   pending.set(id, operation);
   recentProgress.delete(id);
   errors.delete(id);
@@ -497,7 +506,37 @@ async function run(id, execute, { onProgress, onFailure } = {}) {
 function field(name, title, type, options = {}) {
   const wrapper = create("label", title + (options.required ? " *" : ""));
   const input = create("input");
-  Object.assign(input, { name, type, ...options });
+  if (type === "number") {
+    input.name = name;
+    input.type = "text";
+    input.required = Boolean(options.required);
+    input.inputMode = "numeric";
+    let lastValue = "";
+    input.addEventListener("input", () => {
+      const raw = input.value.replaceAll(",", "");
+      if (!/^\d*$/.test(raw)) {
+        input.value = lastValue;
+        return;
+      }
+      const caret = input.value.slice(0, input.selectionStart).replaceAll(",", "").length;
+      const formatted = raw.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+      if (input.value !== formatted) {
+        input.value = formatted;
+        let position = 0;
+        let digits = 0;
+        while (digits < caret && position < formatted.length) {
+          if (formatted[position++] !== ",") digits += 1;
+        }
+        input.setSelectionRange(position, position);
+      }
+      lastValue = formatted;
+      const number = Number(raw);
+      const valid = Number.isSafeInteger(number) && number >= Number(options.min);
+      input.setCustomValidity(raw && !valid ? `Enter a whole number of at least ${options.min}.` : "");
+    });
+  } else {
+    Object.assign(input, { name, type, ...options });
+  }
   wrapper.append(input);
   return wrapper;
 }
@@ -536,16 +575,16 @@ function openForm(type) {
     field("domain", "Company domain", "text", { required: true, maxLength: 253, placeholder: "example.com" }),
   ];
   if (type === "lead") {
-    fields.push(field("gbv", "Annual GBV (USD)", "number", { required: true, min: "0", step: "0.01" }),
-      field("employee_count", "Employee count", "number", { min: "1", step: "1" }));
+    fields.push(field("gbv", "Annual GBV (USD)", "number", { required: true, min: "0" }),
+      field("employee_count", "Employee count", "number", { min: "1" }));
   } else {
     fields.push(select("current_tier", "Current tier *", ["1", "2", "3"], true),
-      field("months", "Months since signup", "number", { required: true, min: "1", step: "1" }),
-      field("total_gbv", "Total GBV since signup (USD)", "number", { min: "0", step: "0.01" }),
-      field("avg_monthly_bookings", "Average monthly bookings", "number", { min: "0", step: "0.01" }),
-      field("employee_count", "Current employee count", "number", { min: "1", step: "1" }),
-      field("avg_monthly_active_users", "Average monthly active users", "number", { min: "0", step: "0.01" }),
-      field("avg_monthly_support_requests", "Average monthly support requests", "number", { min: "0", step: "0.01" }));
+      field("months", "Months since signup", "number", { required: true, min: "1" }),
+      field("total_gbv", "Total GBV since signup (USD)", "number", { min: "0" }),
+      field("avg_monthly_bookings", "Average monthly bookings", "number", { min: "0" }),
+      field("employee_count", "Current employee count", "number", { min: "1" }),
+      field("avg_monthly_active_users", "Average monthly active users", "number", { min: "0" }),
+      field("avg_monthly_support_requests", "Average monthly support requests", "number", { min: "0" }));
     for (const key of ["travel_spend", "company_size", "product_adoption"]) {
       fields.push(select(key + "_trend", titleCase(key) + " trend", ["unknown", "increasing", "stable", "decreasing"]));
     }
@@ -557,11 +596,12 @@ function openForm(type) {
 
 function formPayload(type, form) {
   const values = Object.fromEntries(new FormData(form));
-  const integer = key => values[key] === "" ? null : Number(values[key]);
+  const numericText = key => (values[key] ?? "").replaceAll(",", "");
+  const integer = key => values[key] ? Number(numericText(key)) : null;
   const payload = { company_name: values.name, company_domain: values.domain, employee_count: integer("employee_count") };
-  if (type === "lead") return { ...payload, submitted_annual_gbv: values.gbv };
+  if (type === "lead") return { ...payload, submitted_annual_gbv: numericText("gbv") };
   for (const key of ["total_gbv", "avg_monthly_bookings", "avg_monthly_active_users", "avg_monthly_support_requests"]) {
-    payload[key] = values[key] === "" ? null : values[key];
+    payload[key] = values[key] === "" ? null : numericText(key);
   }
   return {
     ...payload, current_tier: integer("current_tier"), months_since_signup: integer("months"),
@@ -589,17 +629,18 @@ $("new").onclick = async () => {
   catch (error) { showGlobalError(error); }
   finally { $("new").disabled = false; }
 };
-$("example").onclick = () => {
-  $("question").value = "Why was an upgrade recommended?";
-  $("question").focus();
-};
+$("question").addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  $("chat").requestSubmit();
+});
 $("chat").onsubmit = async event => {
   event.preventDefault();
   const id = active;
   const question = $("question").value.trim();
   if (!question || !id || isBusy(id)) return;
   $("question").value = "";
-  await run(id, progress => APIClient.chat(id, question, progress));
+  await run(id, progress => APIClient.chat(id, question, progress), { chat: true });
 };
 $("lead").onclick = () => openForm("lead");
 $("customer").onclick = () => openForm("customer");
@@ -636,6 +677,72 @@ $("submission").onsubmit = async event => {
   }
 };
 
+const tourSteps = [
+  { target: "chat", title: "AI Assistant", description: "Ask about your companies, their activity, or past recommendations." },
+  { target: "lead", title: "Submit Lead", description: "Add a new prospect to start an evaluation and see a tier recommendation." },
+  { target: "customer", title: "Submit Customer Activity", description: "Add a customer activity snapshot to check whether their tier should be reviewed." },
+  { target: "companiesHeading", title: "Companies", description: "See the companies you’ve added and their current tiers." },
+];
+
+function startTour() {
+  const storageKey = "navan.tourSeen";
+  try { if (localStorage.getItem(storageKey)) return; } catch {}
+  const dialog = $("tour");
+  const margin = 12;
+  const gap = 12;
+  const initialY = window.scrollY;
+  let index = 0;
+  let target;
+
+  function position() {
+    const bounds = target.getBoundingClientRect();
+    const width = dialog.offsetWidth;
+    const height = dialog.offsetHeight;
+    const center = bounds.left + bounds.width / 2;
+    const viewportWidth = document.documentElement.clientWidth;
+    const left = Math.max(margin, Math.min(center - width / 2, viewportWidth - width - margin));
+    const below = bounds.bottom + gap + height <= window.innerHeight - margin;
+    const top = below ? bounds.bottom + gap : bounds.top - gap - height;
+    dialog.style.left = left + "px";
+    dialog.style.top = Math.max(margin, top) + "px";
+    dialog.style.setProperty("--tour-arrow", Math.max(margin, Math.min(center - left, width - margin)) + "px");
+    dialog.classList.toggle("tour--below", below);
+  }
+
+  function showStep() {
+    target?.classList.remove("tour-highlight");
+    const step = tourSteps[index];
+    target = $(step.target);
+    target.classList.add("tour-highlight");
+    $("tourProgress").textContent = (index + 1) + " of " + tourSteps.length;
+    $("tourTitle").textContent = step.title;
+    $("tourDescription").textContent = step.description;
+    $("tourBack").hidden = index === 0;
+    $("tourNext").textContent = index === tourSteps.length - 1 ? "Done" : "Next";
+    target.scrollIntoView({ block: "center", behavior: "instant" });
+    position();
+    $("tourNext").focus({ preventScroll: true });
+  }
+
+  $("tourSkip").onclick = () => dialog.close();
+  $("tourBack").onclick = () => { index -= 1; showStep(); };
+  $("tourNext").onclick = () => {
+    if (index === tourSteps.length - 1) dialog.close();
+    else { index += 1; showStep(); }
+  };
+  dialog.addEventListener("close", () => {
+    target?.classList.remove("tour-highlight");
+    window.removeEventListener("resize", position);
+    window.removeEventListener("scroll", position);
+    window.scrollTo({ top: initialY, behavior: "instant" });
+    try { localStorage.setItem(storageKey, "1"); } catch {}
+  }, { once: true });
+  dialog.showModal();
+  showStep();
+  window.addEventListener("resize", position);
+  window.addEventListener("scroll", position, { passive: true });
+}
+
 async function initialize() {
   $("lead").disabled = $("customer").disabled = $("chat").querySelector("button").disabled = true;
   try {
@@ -644,6 +751,7 @@ async function initialize() {
     try { remembered = localStorage.getItem("navan.activeConversation"); } catch {}
     const available = conversations.find(row => row.id === remembered) || conversations[0];
     await selectThread(available?.id || (await APIClient.createConversation()).id);
+    startTour();
   } catch (error) {
     const recovery = create("button", "Retry loading workspace");
     recovery.onclick = initialize;
