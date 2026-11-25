@@ -11,9 +11,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app import create_app
 from app.ai.client import AIClient
-from app.models import Base, Company, CompanyResearch, Evaluation, Workspace
-from app.orchestrator import LeadEvaluationResult, LeadWorkflowFailure, Orchestrator
-from app.validation import LeadInput
+from app.data.models import Base, Company, CompanyResearch, Evaluation, Workspace
+from app.business.lead_submission.workflow import LeadEvaluationResult, LeadWorkflowFailure, LeadSubmission
+from app.business.rules.validation import LeadInput
 from scripts.smoke_database import open_local_database
 
 PROFILES = {
@@ -67,7 +67,7 @@ def main() -> None:
             session.flush()
             workspace_id = workspace.id
         lead = PROFILES[args.profile]
-        orchestrator = Orchestrator(
+        orchestrator = LeadSubmission(
             sessions, ai_client=AIClient(), reference_sessions=app.extensions["db_sessions"],
         )
 

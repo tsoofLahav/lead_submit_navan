@@ -6,8 +6,8 @@ from flask import Flask
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from .database import configure_database
-from .http_api import configure_http
+from .data.database import configure_database
+from .orchestrator.routes import configure_http
 
 
 def create_app() -> Flask:

@@ -5,13 +5,14 @@ from uuid import UUID
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
 from app import create_app
-from app.chat import ChatAssistant
-from app.chat_tools import build_chat_tools
+from app.orchestrator.actions import Orchestrator
+from app.conversations.tools import build_chat_tools
 from app.ai.config import Component
-from app.models import Company, CompanyResearch, DemoCompany, Evaluation, ProductActivity, TierChange
-from app.orchestrator import Orchestrator
+from app.data.company_lock import company_lock
+from app.data.models import Company, CompanyResearch, DemoCompany, Evaluation, ProductActivity, TierChange
 from test_ai import message as response_message, mock_client, scoped_evidence, terminal
 from test_chat import call, final, references
 from test_customer_reevaluation import assessment, recommendation, uncertain_responses
@@ -86,8 +87,8 @@ def test_lead_real_persistence_stream_and_duplicate(web, sessions, references):
     business, requests = mock_client(
         lead_response(research_data(), research=True), lead_response(prediction_data()), lead_response(decision_data()),
     )
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
-        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(
+        sessions, evaluation_client=business,
     )
     client = web.test_client()
     path = thread(client)
@@ -111,8 +112,8 @@ def test_lead_real_persistence_stream_and_duplicate(web, sessions, references):
 
 def test_customer_optional_amounts_and_first_snapshot_evaluation(web, sessions, references):
     business, requests = mock_client(*uncertain_responses(), *uncertain_responses())
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
-        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(
+        sessions, evaluation_client=business,
     )
     client = web.test_client()
     path = thread(client)
@@ -131,7 +132,7 @@ def test_customer_optional_amounts_and_first_snapshot_evaluation(web, sessions, 
 def test_triggered_customer_and_approval_or_rejection(web, sessions, references, accept):
     business, _ = mock_client([terminal([response_message(json.dumps(assessment()))])],
                               [terminal([response_message(json.dumps(recommendation()))])])
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=business))
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(sessions, evaluation_client=business)
     client, outsider = web.test_client(), web.test_client()
     path = thread(client)
     events = frames(post(client, path + "/customer-activity", payload("Growth", total_gbv="360000", employee_count=220)))
@@ -149,7 +150,7 @@ def test_triggered_customer_and_approval_or_rejection(web, sessions, references,
 
 def test_chat_tool_and_explicit_retry(web, sessions, references):
     sdk, requests = mock_client(500, [terminal([call("get_business_policy", {})])], final("A valid policy answer."))
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(sessions, sdk=sdk._sdk)
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(sessions, sdk=sdk._sdk)
     client = web.test_client()
     path = thread(client)
     failure = frames(post(client, path + "/chat", {"message": "What is the eligibility policy?"}))[-1]
@@ -162,11 +163,32 @@ def test_chat_tool_and_explicit_retry(web, sessions, references):
     assert len(client.get(path).json["messages"]) == 2 and len(requests) == 3
 
 
+def test_company_lock_reports_busy_across_conversations(web, engine, sessions, references):
+    business, requests = mock_client(*uncertain_responses())
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(sessions, evaluation_client=business)
+    client = web.test_client()
+    first, second = thread(client), thread(client)
+    with client.session_transaction() as browser_session:
+        workspace_id = UUID(browser_session["workspace_id"])
+
+    with company_lock(sessionmaker(engine), workspace_id, " quiet "):
+        for path in (first, second):
+            event, body = frames(post(client, path + "/customer-activity", payload("Quiet")))[-1]
+            assert event == "error" and body["code"] == "busy"
+        assert not requests
+        with sessions() as session:
+            assert session.scalar(select(func.count(Company.id))) == 0
+            assert session.scalar(select(func.count(ProductActivity.id))) == 0
+
+    assert frames(post(client, second + "/customer-activity", payload("Quiet")))[-1][0] == "result"
+    assert len(requests) == 2
+
+
 def test_workflow_and_message_only_retry(web, sessions, references, monkeypatch):
     business, _ = mock_client(500, lead_response(research_data(), research=True),
                               lead_response(prediction_data()), lead_response(decision_data()), *uncertain_responses())
-    service = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=business))
-    web.extensions["http_chat_factory"] = lambda _: service
+    service = Orchestrator(sessions, evaluation_client=business)
+    web.extensions["http_orchestrator_factory"] = lambda _: service
     client = web.test_client()
     path = thread(client)
     failure = frames(post(client, path + "/leads", {
@@ -179,7 +201,7 @@ def test_workflow_and_message_only_retry(web, sessions, references, monkeypatch)
     with monkeypatch.context() as patch:
         def fail(*args):
             raise SQLAlchemyError("private details")
-        patch.setattr(service, "save_prepared_message", fail)
+        patch.setattr(service.conversations, "save_prepared_message", fail)
         save_failure = frames(post(client, path + "/customer-activity", payload("Quiet")))[-1][1]
     assert save_failure["code"] == "message_persistence_failed"
     assert "private" not in json.dumps(save_failure)
@@ -192,8 +214,8 @@ def test_workflow_and_message_only_retry(web, sessions, references, monkeypatch)
 
 def test_disconnect_does_not_cancel_and_other_thread_can_load(web, sessions, monkeypatch, references):
     business, _ = mock_client(*uncertain_responses())
-    service = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=business))
-    web.extensions["http_chat_factory"] = lambda _: service
+    service = Orchestrator(sessions, evaluation_client=business)
+    web.extensions["http_orchestrator_factory"] = lambda _: service
     original = service.submit_customer_reevaluation
     started, release, done = Event(), Event(), Event()
 
@@ -235,8 +257,8 @@ def test_research_failure_logs_safe_diagnostic_and_retry_creates_no_duplicate(
         bad, lead_response(invalid), bad, lead_response(invalid), lead_response(research_data(), research=True),
         lead_response(prediction_data()), lead_response(decision_data()),
     )
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
-        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(
+        sessions, evaluation_client=business,
     )
     client = web.test_client()
     path = thread(client)
@@ -311,8 +333,8 @@ def test_demo_company_copies_are_interactive_and_isolated(web, sessions, referen
         ) for name, domain in examples.items())
     business, requests = mock_client([terminal([response_message(json.dumps(assessment()))])],
                                      [terminal([response_message(json.dumps(recommendation()))])])
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
-        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(
+        sessions, evaluation_client=business,
     )
     visitor, outsider = web.test_client(), web.test_client()
 
@@ -369,7 +391,7 @@ def test_demo_company_copies_are_interactive_and_isolated(web, sessions, referen
 
 
 
-def test_existing_workspace_gets_missing_demo_companies_on_list(web, sessions):
+def test_existing_workspace_gets_missing_demo_companies_on_list(web, engine, sessions):
     client = web.test_client()
     assert client.get("/api/companies").json["companies"] == []
     with client.session_transaction() as browser_session:
@@ -383,6 +405,10 @@ def test_existing_workspace_gets_missing_demo_companies_on_list(web, sessions):
         ])
         session.flush()
         existing_id = str(existing.id)
+    with company_lock(sessionmaker(engine), workspace, "  valarian "):
+        assert client.get("/api/companies").json["companies"] == [
+            {"name": "Gradient Labs", "id": existing_id, "tier": 1},
+        ]
     companies = client.get("/api/companies").json["companies"]
     assert {row["name"] for row in companies} == {"Gradient Labs", "Valarian"}
     assert {"name": "Gradient Labs", "id": existing_id, "tier": 1} in companies
@@ -408,8 +434,8 @@ def test_v5_low_confidence_partial_or_conflicting_customer_changes_are_reviewabl
         [terminal([response_message(json.dumps(observed))])],
         [terminal([response_message(json.dumps(proposed))])],
     )
-    web.extensions["http_chat_factory"] = lambda _: ChatAssistant(
-        sessions, orchestrator=Orchestrator(sessions, ai_client=business),
+    web.extensions["http_orchestrator_factory"] = lambda _: Orchestrator(
+        sessions, evaluation_client=business,
     )
     client = web.test_client()
     path = thread(client)

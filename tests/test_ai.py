@@ -14,14 +14,15 @@ from app.ai.client import AIClient, AIExecutionError, FailureKind
 from app.ai.config import AISettings, Component
 from app.ai.progress import ProgressKind
 from app.ai.prompts import PromptRenderError, PromptRenderer, Task
+from app.ai.request import AIRequest
 from app.ai.schemas import (
     LeadAssessmentOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput, ScopedResearchOutput, Signal, StructuredOutput,
     evaluation_output_fields,
 )
 from app.ai.tools import ReadOnlyFunction, ToolError, ToolRegistry, strict_schema
-from app.reference_data import PromptNotFound
-from app.reevaluation_gate import ReevaluationGate
-from app.validation import (
+from app.data.reference_data import PromptNotFound
+from app.business.customer_reevaluation.gate import ReevaluationGate
+from app.business.rules.validation import (
     AIOutputValidationError, CustomerActivityInput, LeadInput,
     validate_product_assessment, validate_recommendation, validate_research,
 )
@@ -138,6 +139,24 @@ def mock_client(*batches, tools=None):
 
     sdk = OpenAI(api_key="mock-only", http_client=httpx.Client(transport=httpx.MockTransport(handler)), max_retries=2)
     return AIClient(tools, sdk=sdk), requests
+
+
+def test_client_executes_request_without_business_task():
+    class Answer(StructuredOutput):
+        answer: str
+
+    settings = AISettings.from_env(Component.PREDICTION)
+    client, requests = mock_client([terminal([message('{"answer":"hello"}')])])
+    prompt = AIRequest(
+        component=Component.PREDICTION, instructions="Return an answer.", input_json="{}",
+        settings=settings, output_schema=Answer, tool_options={"tools": [], "tool_choice": "none"},
+        validate_output=lambda answer: Answer(answer=answer.answer.upper()),
+    )
+
+    result = client.execute(prompt)
+
+    assert result.output == Answer(answer="HELLO")
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize("component", list(Component))

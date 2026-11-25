@@ -7,11 +7,15 @@ import pytest
 from sqlalchemy import func, select
 
 from app.ai.progress import ProgressKind
-from app.human_approval import HumanApproval
-from app.models import BusinessPolicy, Company, CompanyResearch, Evaluation, ProductActivity, Prompt, TierChange
-from app.orchestrator import CustomerStage, CustomerWorkflowFailure, Orchestrator
-from app.reevaluation_gate import GateStatus
-from app.validation import CustomerActivityInput, LeadInput
+from app.business.human_approval.service import HumanApproval
+from app.data.company_lock import CompanyBusy, company_lock
+from app.data.models import BusinessPolicy, Company, CompanyResearch, Evaluation, ProductActivity, Prompt, TierChange
+from app.business.customer_reevaluation.workflow import (
+    CustomerReevaluation, CustomerStage, CustomerWorkflowFailure,
+)
+from app.business.lead_submission.workflow import LeadSubmission
+from app.business.customer_reevaluation.gate import GateStatus
+from app.business.rules.validation import CustomerActivityInput, LeadInput
 from test_ai import POLICY, SYSTEM, message, mock_client, terminal
 
 pytestmark = pytest.mark.write_integration
@@ -75,7 +79,7 @@ def test_first_valid_submission_evaluates_even_without_business_indicators(sessi
     store_reference_data(sessions)
     owner, _ = workspace_ids
     client, requests = mock_client(*uncertain_responses())
-    result = Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(owner, activity)
+    result = CustomerReevaluation(sessions, ai_client=client).submit_customer_reevaluation(owner, activity)
     assert result.gate.status == status and not result.gate.triggered_conditions
     assert result.recommendation.outcome == "undetermined" and not result.approval_available
     assert counts(sessions) == (1, 1, 1, 0) and len(requests) == 2
@@ -95,8 +99,8 @@ def test_upgrade_context_persistence_and_human_decision(sessions, workspace_ids,
     store_reference_data(sessions)
     owner, _ = workspace_ids
     client, requests = mock_client(response(assessment()), response(recommendation()))
-    orchestrator = Orchestrator(sessions, ai_client=client)
-    existing = orchestrator.register_lead(owner, LeadInput("Synthetic Customer", "example.com", Decimal("999999")))
+    orchestrator = CustomerReevaluation(sessions, ai_client=client)
+    existing = LeadSubmission(sessions).register_lead(owner, LeadInput("Synthetic Customer", "example.com", Decimal("999999")))
     with sessions.begin() as session:
         research = CompanyResearch(company_id=existing.company_id, signals={"history": "do not send past research"})
         session.add(research)
@@ -163,7 +167,7 @@ def test_triggered_retain_keeps_adoption_caveat(sessions, workspace_ids):
     store_reference_data(sessions)
     owner, _ = workspace_ids
     client, requests = mock_client(response(assessment()), response(recommendation("retain", 2)))
-    result = Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(owner, RETAIN)
+    result = CustomerReevaluation(sessions, ai_client=client).submit_customer_reevaluation(owner, RETAIN)
     assert result.gate.metrics.adoption_rate_percent == 120
     assert any("exceeds 100%" in gap for gap in result.gate.information_gaps)
     assert "exceeds 100%" in requests[0]["input"][1]["content"]
@@ -188,7 +192,7 @@ def test_technical_or_invalid_output_keeps_activity(sessions, workspace_ids, act
     client, requests = mock_client(*batches)
     events = []
     with pytest.raises(CustomerWorkflowFailure) as caught:
-        Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(owner, activity, on_progress=events.append)
+        CustomerReevaluation(sessions, ai_client=client).submit_customer_reevaluation(owner, activity, on_progress=events.append)
     failure = caught.value
     assert failure.stage == stage and failure.activity_id is not None and failure.gate.status == GateStatus.TRIGGERED
     assert events[-1].kind == ProgressKind.EVALUATION_FAILED and events[-1].workflow_stage == stage
@@ -201,7 +205,7 @@ def test_retry_reuses_saved_activity_and_blocks_cross_workspace_or_completed_ret
     store_reference_data(sessions)
     owner, outsider = workspace_ids
     client, requests = mock_client(500, response(assessment()), response(recommendation()))
-    orchestrator = Orchestrator(sessions, ai_client=client)
+    orchestrator = CustomerReevaluation(sessions, ai_client=client)
     with pytest.raises(CustomerWorkflowFailure) as failure:
         orchestrator.submit_customer_reevaluation(owner, UPGRADE)
     activity_id = failure.value.activity_id
@@ -215,39 +219,31 @@ def test_retry_reuses_saved_activity_and_blocks_cross_workspace_or_completed_ret
     assert len(requests) == 3
 
 
-@pytest.mark.parametrize("mutate_during", [ProgressKind.REEVALUATION_GATE_ASSESSED, ProgressKind.RECOMMENDATION_COMPLETED])
 @pytest.mark.parametrize("change", ["activity", "tier"])
-def test_stale_activity_or_tier_is_rejected(sessions, workspace_ids, mutate_during, change):
+def test_retry_rejects_a_snapshot_that_was_already_stale(sessions, workspace_ids, change):
     store_reference_data(sessions)
     owner, _ = workspace_ids
-    client, requests = mock_client(response(assessment()), response(recommendation()))
-    orchestrator = Orchestrator(sessions, ai_client=client)
+    client, requests = mock_client(500)
+    workflow = CustomerReevaluation(sessions, ai_client=client)
+    with pytest.raises(CustomerWorkflowFailure) as failure:
+        workflow.submit_customer_reevaluation(owner, UPGRADE)
 
-    def progress(event):
-        if event.kind != mutate_during:
-            return
-        if change == "activity":
-            orchestrator.submit_customer_activity(owner, UPGRADE)
-        else:
-            with sessions.begin() as session:
-                company = session.scalar(select(Company))
-                snapshot = session.scalar(select(ProductActivity))
-                company.current_tier = 2
-                session.add(TierChange(
-                    company_id=company.id, previous_tier=3, new_tier=2,
-                    created_at=snapshot.created_at + timedelta(microseconds=1),
-                ))
+    if change == "activity":
+        workflow.submit_customer_activity(owner, UPGRADE)
+    else:
+        with sessions.begin() as session:
+            company = session.scalar(select(Company))
+            snapshot = session.get(ProductActivity, failure.value.activity_id)
+            company.current_tier = 2
+            session.add(TierChange(
+                company_id=company.id, previous_tier=3, new_tier=2,
+                created_at=snapshot.created_at + timedelta(microseconds=1),
+            ))
 
-    with pytest.raises(CustomerWorkflowFailure, match=f"stale_{change}") as failure:
-        orchestrator.submit_customer_reevaluation(owner, UPGRADE, on_progress=progress)
-    assert failure.value.stage == (
-        CustomerStage.CONTEXT if mutate_during == ProgressKind.REEVALUATION_GATE_ASSESSED
-        else CustomerStage.EVALUATION_PERSISTENCE
-    )
-    assert len(requests) == (0 if mutate_during == ProgressKind.REEVALUATION_GATE_ASSESSED else 2)
-    with pytest.raises(CustomerWorkflowFailure, match=f"stale_{change}"):
-        orchestrator.retry_customer_reevaluation(owner, failure.value.activity_id)
-    assert counts(sessions)[2] == 0
+    with pytest.raises(CustomerWorkflowFailure, match=f"stale_{change}") as stale:
+        workflow.retry_customer_reevaluation(owner, failure.value.activity_id)
+    assert stale.value.stage == CustomerStage.CONTEXT
+    assert len(requests) == 1 and counts(sessions)[2] == 0
 
 
 @pytest.mark.parametrize(("current", "gbv", "headcount", "adoption", "target", "decision"), [
@@ -257,7 +253,7 @@ def test_stale_activity_or_tier_is_rejected(sessions, workspace_ids, mutate_duri
     (2, "99999", 149, "declining", 3, "stale"),
 ])
 def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcount, adoption, target, decision):
-    from app.human_approval import RecommendationConflict
+    from app.business.human_approval.service import RecommendationConflict
     from scripts.smoke_revised_policy import seed_revised_policy
 
     seed_revised_policy(sessions)
@@ -272,7 +268,7 @@ def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcou
     prediction = {**assessment(), "findings": [{"evidence": keys, "interpretation": "Current eligibility evidence."}]}
     proposed = {**recommendation("downgrade", target), "supporting_evidence": keys}
     client, requests = mock_client(response(prediction), response(proposed))
-    workflow = Orchestrator(sessions, ai_client=client)
+    workflow = CustomerReevaluation(sessions, ai_client=client)
     result = workflow.submit_customer_reevaluation(owner, value)
     assert result.approval_available and result.recommendation.recommended_tier == target
     guidance = json.loads(requests[1]["input"][1]["content"])["quantitative_tier_guidance"]
@@ -298,8 +294,8 @@ def test_final_downgrade_workflow(sessions, workspace_ids, current, gbv, headcou
 
 def test_undetermined_is_valid_with_no_business_evidence_but_retain_requires_support():
     from app.ai.schemas import ActivityEvidence, ProductAssessmentOutput, RecommendationOutput
-    from app.reevaluation_gate import ReevaluationGate
-    from app.validation import AIOutputValidationError, validate_recommendation
+    from app.business.customer_reevaluation.gate import ReevaluationGate
+    from app.business.rules.validation import AIOutputValidationError, validate_recommendation
 
     activity = EMPTY
     gate = ReevaluationGate.assess(activity)
@@ -320,7 +316,7 @@ def test_activity_changes_compare_latest_normalized_values_and_policy(sessions, 
     store_reference_data(sessions)
     owner, _ = workspace_ids
     client, requests = mock_client(*(uncertain_responses() * 5))
-    workflow = Orchestrator(sessions, ai_client=client)
+    workflow = CustomerReevaluation(sessions, ai_client=client)
     first = workflow.submit_customer_reevaluation(owner, EMPTY)
     with_bookings = replace(EMPTY, avg_monthly_bookings=Decimal("1.00"))
     second = workflow.submit_customer_reevaluation(owner, with_bookings)
@@ -343,7 +339,7 @@ def test_failed_sparse_activity_can_retry(sessions, workspace_ids):
     store_reference_data(sessions)
     owner, _ = workspace_ids
     client, requests = mock_client(500, *uncertain_responses())
-    workflow = Orchestrator(sessions, ai_client=client)
+    workflow = CustomerReevaluation(sessions, ai_client=client)
     with pytest.raises(CustomerWorkflowFailure) as failed:
         workflow.submit_customer_reevaluation(owner, EMPTY)
     retry = workflow.retry_customer_reevaluation(owner, failed.value.activity_id)
@@ -356,11 +352,9 @@ def test_concurrent_activity_is_blocked_before_any_ai_request(engine):
     from sqlalchemy.orm import sessionmaker
 
     factory = sessionmaker(engine)
-    workflow = Orchestrator(factory)
     workspace_id = uuid4()
-    with factory.begin() as competing:
-        workflow._lock_customer_evaluation(competing, workspace_id, EMPTY.company_name)
+    with company_lock(factory, workspace_id, EMPTY.company_name):
         client, requests = mock_client()
-        with pytest.raises(CustomerWorkflowFailure, match="activity_evaluation_in_progress"):
-            Orchestrator(factory, ai_client=client).submit_customer_reevaluation(workspace_id, EMPTY)
+        with pytest.raises(CompanyBusy):
+            CustomerReevaluation(factory, ai_client=client).submit_customer_reevaluation(workspace_id, EMPTY)
         assert not requests

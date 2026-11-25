@@ -10,23 +10,47 @@ Responses infrastructure for later workflow integration.
 ```text
 app/
   __init__.py        Flask application factory and GET /health
-  database.py        PostgreSQL engine and session factory
-  models.py          Explicit ORM mappings for the ten public tables
-  reference_data.py  Business policy and prompt queries
-  workspaces.py      Signed browser workspace resolution
-  data_access.py     Workspace-scoped company and related-record access
-  validation.py      Typed business inputs and validation
-  tier_eligibility.py Shared Section 1 thresholds
-  orchestrator.py    Lead registration and customer activity transactions
-  reevaluation_gate.py Section 6 snapshot metrics and triggers
-  human_approval.py  Recommendation decisions and supersession
+  orchestrator/
+    routes.py        Flask routes, input parsing and operation selection
+    streaming.py     Request context, worker, SSE and retry drafts
+    responses.py     Public JSON and error mapping
+    actions.py       Coordinate evaluations, decisions and chat replies
+    workspaces.py    Signed browser workspace resolution and demo data
+  business/
+    lead_submission/
+      workflow.py    Register leads and run their evaluations
+    customer_reevaluation/
+      workflow.py    Record customer activity and run reevaluations
+      gate.py        Activity metrics and reevaluation triggers
+    human_approval/
+      service.py     Accept or reject recommendations
+    rules/
+      revised_policy.py Evidence-based calculations
+      tier_eligibility.py Shared tier thresholds
+      validation.py  Typed business inputs and validation
+    _evaluation.py   Shared setup and progress for evaluation workflows
+  conversations/
+    service.py       Workspace-scoped conversation and message persistence
+    tools.py         Read-only tools available to chat
+  data/
+    database.py      PostgreSQL engine and session factory
+    models.py        SQLAlchemy ORM mappings
+    access.py        Workspace-scoped data access
+    company_lock.py  Shared PostgreSQL lock for company writes
+    reference_data.py Business policy and prompt queries
   ai/
-    client.py        Responses API, final parsing, errors and telemetry
-    config.py        Per-component model, reasoning and execution settings
-    prompts.py       Stored templates and explicit evaluation context
-    schemas.py       Structured outputs and existing evaluation-field mapping
-    tools.py         Hosted search and authorized read-only function dispatch
+    client.py        Provider execution, validation callbacks and telemetry
+    request.py       Shared AI request contract
+    config.py        Model and execution settings
+    engines.py       Prepare and run assessment stages
+    prompts.py       Stored templates and evaluation context
+    schemas.py       Structured outputs
+    tools.py         Tool definitions and dispatch
     progress.py      Typed progress events
+    budget.py        Evaluation deadline and estimated spend
+    diagnostics.py   Evaluation reports
+  static/            Browser assets
+  templates/         Flask HTML templates
 tests/
   test_app.py        Local unit tests
   test_database.py   Read-only regression tests against PostgreSQL
@@ -161,10 +185,10 @@ HTTP development.
   returned ID to the business operations.
 - `WorkspaceData` scopes company lookup and direct retrieval of companies,
   research, activity, evaluations, tier changes, conversations and messages.
-- `Orchestrator.register_lead(workspace_id, lead)` validates the lead,
+- `LeadSubmission.register_lead(workspace_id, lead)` validates the lead,
   calculates its Section 1 tier and reports whether registration created a
   company. It preserves an existing company's tier and customer status.
-- `Orchestrator.submit_customer_activity(workspace_id, activity)` records the
+- `CustomerReevaluation.submit_customer_activity(workspace_id, activity)` records the
   submitted current tier, appends an activity snapshot, supersedes pending
   recommendations and returns the gate result. These writes share a transaction.
   Use Decimal values for the financial and activity measurements.
@@ -177,8 +201,15 @@ HTTP development.
   status update and checks the company's current tier and newer activity.
   The tier update, decision, linked history row and supersession are atomic.
   `reject(workspace_id, evaluation_id)` records the decision only.
-  `supersede_pending(data, company_id)` invalidates pending recommendations
+  `WorkspaceData.supersede_pending_evaluations(company_id)` invalidates pending recommendations
   within the caller's transaction.
+
+Company writes share a non-blocking PostgreSQL advisory lock keyed by
+workspace and normalized company name. Registration, activity submission,
+evaluation, retry and approval acquire it at their public business entry
+points. Evaluation holds one connection for the lock while its write
+transactions commit separately. After an SSE stream opens, a competing write
+returns an error event with code `busy`. Read-only requests can proceed.
 
 Company names match by normalized whitespace and Unicode casefolding inside
 each workspace. Domains are ASCII DNS names and are stored in lowercase
@@ -240,7 +271,7 @@ owner-only permissions for newly created directories and files. Configure
 DEBUG includes request and hosted search details. Reports keep those details
 regardless of terminal verbosity. Each retry gets its own attempt ID under
 the same correlation ID. The HTTP workflow keeps the ID in saved failure
-metadata. Direct Orchestrator callers can pass the failure's
+metadata. Direct evaluation callers can pass the failure's
 `evaluation_correlation_id` as `correlation_id` on retry.
 
 Context sizes are measured in UTF-8 bytes. Token usage comes from the API
@@ -279,7 +310,7 @@ completed calls, service tier, elapsed time and token usage.
 ## Stage 4 Lead Submission
 
 From application code, pass a workspace ID resolved on the server and a
-`LeadInput` to `Orchestrator(app.extensions["db_sessions"]).submit_lead(...)`.
+`LeadInput` to `LeadSubmission(app.extensions["db_sessions"]).submit_lead(...)`.
 A new lead returns a `LeadEvaluationResult` containing company details,
 current and initial tier, validated research and sources, predictions,
 recommendation, evaluation ID, approval availability and timing metadata.
@@ -326,7 +357,7 @@ progress events and a JSON report. Each invocation makes live OpenAI requests.
 ## Stage 5 Customer Re-evaluation
 
 From application code, call
-`Orchestrator(app.extensions["db_sessions"]).submit_customer_reevaluation(workspace_id, activity)`
+`CustomerReevaluation(app.extensions["db_sessions"]).submit_customer_reevaluation(workspace_id, activity)`
 with a workspace ID resolved on the server and a `CustomerActivityInput`.
 The activity transaction saves a new snapshot, records an external tier
 change when needed, and supersedes obsolete pending recommendations. The
@@ -378,18 +409,17 @@ Each case prints progress and a JSON report with its result and telemetry.
 
 ## Stage 6 Chat and conversations
 
-Create `ChatAssistant(app.extensions["db_sessions"])` and pass the workspace
-ID resolved on the server. The application selects a conversation ID using
-`create_conversation()`, `list_conversations()` and `get_conversation()`.
-Use `list_messages()` for chronological pages and `rename_conversation()`
-for an explicit title. The first interaction supplies a deterministic title
-for a new conversation.
+Use `ConversationService` for `create_conversation()`, `list_conversations()`,
+`get_conversation()`, `list_messages()` and `rename_conversation()`. The first
+interaction supplies a deterministic title for a new conversation. The
+`Orchestrator` in `app.orchestrator.actions` coordinates business operations
+with conversations. Pass the workspace ID resolved on the server.
 
-- `send_message()` commits the user message, reads its bounded history, and
+- `reply_to_chat()` commits the user message, reads its bounded history, and
   commits only a validated final assistant response. After an AI failure,
   call `retry_message()` with the original user message ID.
 - `submit_lead()` and `submit_customer_reevaluation()` persist the initiating
-  operation and deterministic result in the selected conversation. Without
+  operation and its result in the selected conversation. Without
   an ID, they reuse the newest workspace conversation or create one when
   none exists. Progress remains routed to the captured conversation ID.
 - `decide_recommendation()` is for explicit application controls.

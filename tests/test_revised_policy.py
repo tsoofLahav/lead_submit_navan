@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app import revised_policy as policy, validation
+from app.business.rules import revised_policy as policy, validation
 from app.ai.config import AISettings, Component
 from app.ai.prompts import PromptRenderer, Task
 from app.ai.schemas import (
@@ -14,11 +14,12 @@ from app.ai.schemas import (
     ResearchSource, ScopedResearchOutput, ScopedResearchSignal, ScopedSignalEvidence, Signal, TravelAssessment,
 )
 from app.ai.tools import ToolRegistry
-from app.human_approval import HumanApproval, RecommendationConflict
-from app.models import Company, Evaluation
-from app.orchestrator import Orchestrator
-from app.reevaluation_gate import ReevaluationGate
-from app.validation import CustomerActivityInput, LeadInput
+from app.business.human_approval.service import HumanApproval, RecommendationConflict
+from app.data.models import Company, Evaluation
+from app.business.customer_reevaluation.workflow import CustomerReevaluation
+from app.business.lead_submission.workflow import LeadSubmission
+from app.business.customer_reevaluation.gate import ReevaluationGate
+from app.business.rules.validation import CustomerActivityInput, LeadInput
 from scripts.smoke_revised_policy import seed_revised_policy
 from test_ai import message, mock_client, search_item, terminal
 
@@ -238,7 +239,7 @@ def test_revised_research_eligibility_persists_pending_and_preserves_approval(se
         [terminal([message(proposed.model_dump_json())])],
         [terminal([message(decision.model_dump_json())])],
     )
-    orchestrator = Orchestrator(sessions, ai_client=client)
+    orchestrator = LeadSubmission(sessions, ai_client=client)
     result = orchestrator.submit_lead(owner, LEAD)
     assert result.initial_tier == result.current_tier == 3 and result.approval_available
     assert json.loads(requests[2]["input"][1]["content"])["forecast_suitability_targets"] == {"1": ["travel_spend_potential"], "2": ["travel_spend_potential"]}
@@ -248,7 +249,7 @@ def test_revised_research_eligibility_persists_pending_and_preserves_approval(se
         assert persisted.decision_status == "pending"
         assert persisted.predictions["tier_alignment"] == "potential_underclassification"
     if external_update:
-        orchestrator.submit_customer_activity(owner, CustomerActivityInput("Demo", "demo.test", 1, 6))
+        CustomerReevaluation(sessions).submit_customer_activity(owner, CustomerActivityInput("Demo", "demo.test", 1, 6))
         with pytest.raises(RecommendationConflict):
             HumanApproval(sessions).accept(owner, result.evaluation_id)
         with sessions() as session:
@@ -292,7 +293,7 @@ def test_revised_customer_qualifying_snapshot_key_is_available_even_if_assessmen
     client, requests = mock_client(
         [terminal([message(assessment.model_dump_json())])], [terminal([message(decision.model_dump_json())])],
     )
-    result = Orchestrator(sessions, ai_client=client).submit_customer_reevaluation(
+    result = CustomerReevaluation(sessions, ai_client=client).submit_customer_reevaluation(
         owner, CustomerActivityInput("Demo", "demo.test", 3, 6, employee_count=220),
     )
     assert result.approval_available and result.recommendation.recommended_tier == 2
@@ -303,7 +304,7 @@ def test_revised_customer_qualifying_snapshot_key_is_available_even_if_assessmen
 
 
 def test_scoped_research_correction_cannot_invent_headcount_or_publication_date():
-    from app.ai.client import _check_scoped_research_correction
+    from app.ai.prompts import _check_scoped_research_correction
 
     original = research([evidence(220, lower=220, upper=220)])
     _check_scoped_research_correction(original, research([]))

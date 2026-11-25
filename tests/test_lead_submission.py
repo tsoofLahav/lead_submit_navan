@@ -4,13 +4,16 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.orm import sessionmaker
 
 from app.ai.progress import ProgressKind
 from app.ai.schemas import Signal
-from app.human_approval import HumanApproval
-from app.models import BusinessPolicy, Company, CompanyResearch, Evaluation, Prompt, TierChange
-from app.orchestrator import LeadResult, LeadStage, LeadWorkflowFailure, Orchestrator
-from app.validation import CustomerActivityInput, LeadInput
+from app.business.human_approval.service import HumanApproval
+from app.data.company_lock import CompanyBusy
+from app.data.models import BusinessPolicy, Company, CompanyResearch, Evaluation, Prompt, TierChange, Workspace
+from app.business.lead_submission.workflow import LeadResult, LeadStage, LeadSubmission, LeadWorkflowFailure
+from app.business.customer_reevaluation.workflow import CustomerReevaluation
+from app.business.rules.validation import CustomerActivityInput, LeadInput
 from test_ai import POLICY, SYSTEM, message, missing_research, mock_client, scoped_evidence, search_item, terminal
 
 pytestmark = pytest.mark.write_integration
@@ -94,7 +97,7 @@ def test_complete_lead_with_missing_research_and_progress(sessions, workspace_id
     client, requests = mock_client(
         [search_started, *response(research_data(), research=True)], response(prediction_data()), response(decision_data()),
     )
-    orchestrator = Orchestrator(sessions, ai_client=client)
+    orchestrator = LeadSubmission(sessions, ai_client=client)
     events = []
 
     def on_progress(event):
@@ -165,7 +168,7 @@ def test_invalid_stage_preserves_only_committed_records(sessions, workspace_ids,
     client, requests = mock_client(*batches[stage])
     events = []
     with pytest.raises(LeadWorkflowFailure) as error:
-        Orchestrator(sessions, ai_client=client).submit_lead(owner, LEAD, on_progress=events.append)
+        LeadSubmission(sessions, ai_client=client).submit_lead(owner, LEAD, on_progress=events.append)
     failure = error.value
     assert failure.stage == stage and failure.company_id is not None
     assert (failure.research_id is not None) == bool(expected_research)
@@ -184,7 +187,7 @@ def test_scope_retry_and_actionable_human_approval(sessions, workspace_ids):
         response(research_data(), research=True), response(prediction_data()),
         response(decision_data()),
     )
-    orchestrator = Orchestrator(sessions, ai_client=client)
+    orchestrator = LeadSubmission(sessions, ai_client=client)
     with pytest.raises(LeadWorkflowFailure) as initial:
         orchestrator.submit_lead(owner, LeadInput("Acme", "example.com", Decimal("700000")))
     company_id = initial.value.company_id
@@ -194,7 +197,7 @@ def test_scope_retry_and_actionable_human_approval(sessions, workspace_ids):
     with pytest.raises(LeadWorkflowFailure, match="lead_not_found"):
         orchestrator.retry_lead_evaluation(owner, uuid4())
     assert len(requests) == 1
-    Orchestrator(sessions).submit_customer_activity(
+    CustomerReevaluation(sessions).submit_customer_activity(
         owner, CustomerActivityInput("Acme", "example.com", 2, 10),
     )
 
@@ -212,27 +215,61 @@ def test_scope_retry_and_actionable_human_approval(sessions, workspace_ids):
         assert session.scalar(select(TierChange).where(TierChange.evaluation_id == result.evaluation_id)) is not None
 
 
-@pytest.mark.parametrize("changed_tier", [False, True])
-def test_newer_activity_or_tier_prevents_actionable_persistence(sessions, workspace_ids, changed_tier):
-    owner, _ = workspace_ids
+def test_lead_evaluation_blocks_company_writes_until_completion(engine, sessions):
+    factory = sessionmaker(engine)
+    owner = uuid4()
+    with factory.begin() as session:
+        session.add(Workspace(id=owner))
+
     lead = LeadInput("Acme", "example.com", Decimal("700000"))
-    company = Orchestrator(sessions).register_lead(owner, lead)
-    Orchestrator(sessions).submit_customer_activity(owner, CustomerActivityInput("Acme", "example.com", 2, 8))
-    client, _ = mock_client(
-        response(research_data(mixed=True), research=True), response(prediction_data(mixed=True)),
-        response(decision_data("upgrade", 1, "high")),
-    )
-
-    def on_progress(event):
-        if event.kind == ProgressKind.RECOMMENDATION_COMPLETED:
-            Orchestrator(sessions).submit_customer_activity(
-                owner, CustomerActivityInput("Acme", "example.com", 1 if changed_tier else 2, 9),
+    workflow = LeadSubmission(factory)
+    activity = CustomerActivityInput(" acme ", "example.com", 2, 9)
+    try:
+        company = workflow.register_lead(owner, lead)
+        with factory.begin() as session:
+            pending = Evaluation(
+                company_id=company.company_id, evaluation_type="lead_submit", current_tier=1,
+                recommended_tier=2, decision_status="pending", predictions={},
+                confidence="high", rationale="Synthetic pending recommendation.",
             )
+            session.add(pending)
+            session.flush()
+            evaluation_id = pending.id
+        client, requests = mock_client(
+            response(research_data(), research=True), response(prediction_data()), response(decision_data()),
+        )
+        callbacks = []
 
-    with pytest.raises(LeadWorkflowFailure, match="stale_company_state") as failure:
-        Orchestrator(sessions, ai_client=client).retry_lead_evaluation(owner, company.company_id, on_progress=on_progress)
-    assert failure.value.stage == LeadStage.EVALUATION_PERSISTENCE
-    assert counts(sessions) == (1, 1, 0)
+        def on_progress(event):
+            if event.kind == ProgressKind.RECOMMENDATION_COMPLETED:
+                callbacks.append(event.kind)
+                with pytest.raises(CompanyBusy):
+                    CustomerReevaluation(factory).submit_customer_activity(owner, activity)
+                with pytest.raises(CompanyBusy):
+                    HumanApproval(factory).accept(owner, evaluation_id)
+                with pytest.raises(CompanyBusy):
+                    workflow.submit_lead(owner, lead)
+                other = LeadInput("Other", "other.example.com", Decimal("50000"))
+                assert workflow.register_lead(owner, other).created
+                with factory() as session:
+                    assert session.get(Company, company.company_id).current_tier == 1
+
+        result = LeadSubmission(factory, ai_client=client, reference_sessions=sessions).retry_lead_evaluation(
+            owner, company.company_id, on_progress=on_progress,
+        )
+        assert callbacks == [ProgressKind.RECOMMENDATION_COMPLETED]
+        assert result.current_tier == 1 and len(requests) == 3
+        assert not workflow.register_lead(owner, lead).created
+
+        failed_client, _ = mock_client(500)
+        with pytest.raises(LeadWorkflowFailure):
+            LeadSubmission(factory, ai_client=failed_client, reference_sessions=sessions).retry_lead_evaluation(
+                owner, company.company_id,
+            )
+        assert CustomerReevaluation(factory).submit_customer_activity(owner, activity).company_id == company.company_id
+    finally:
+        with factory.begin() as session:
+            session.delete(session.get(Workspace, owner))
 
 
 @pytest.mark.parametrize(
@@ -263,7 +300,7 @@ def test_workflow_corrects_only_failed_stage_with_tools_disabled(sessions, works
 
     client, requests = mock_client(*batches)
     events = []
-    result = Orchestrator(sessions, ai_client=client).submit_lead(owner, LEAD, on_progress=events.append)
+    result = LeadSubmission(sessions, ai_client=client).submit_lead(owner, LEAD, on_progress=events.append)
     assert counts(sessions) == (1, 1, 1)
     assert len(requests) == 4
     assert [request["text"]["format"]["name"] for request in requests].count("ScopedResearchOutput") == (
@@ -305,7 +342,7 @@ def test_v5_forecast_upgrade_and_approval_below_quantitative_threshold(sessions,
     proposed["material_suitability_uncertainty"] = material_uncertainty
     proposed["rationale"] = "Observed scale and operations support dedicated coverage. Rollout remains unverified."
     client, _ = mock_client(response(observed, research=True), response(predicted), response(proposed))
-    result = Orchestrator(sessions, ai_client=client).submit_lead(owner, lead)
+    result = LeadSubmission(sessions, ai_client=client).submit_lead(owner, lead)
     assert result.current_tier == 2 and result.recommendation.recommended_tier == 1
     assert result.recommendation.confidence == ("low" if material_uncertainty else "medium")
     assert result.approval_available
@@ -320,6 +357,6 @@ def test_v3_actionable_lead_change_rejects_unsupported_forecast(sessions, worksp
         response(research_data(), research=True), response(prediction_data()), response(proposal), response(proposal),
     )
     with pytest.raises(LeadWorkflowFailure) as failure:
-        Orchestrator(sessions, ai_client=client).submit_lead(owner, LEAD)
+        LeadSubmission(sessions, ai_client=client).submit_lead(owner, LEAD)
     assert failure.value.executions[-1].validation_diagnostic.rule_id == "recommendation.missing_evidence"
     assert counts(sessions) == (1, 1, 0) and len(requests) == 4

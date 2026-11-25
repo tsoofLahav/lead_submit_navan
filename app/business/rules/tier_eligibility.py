@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from .validation import TIERS
+
 TIER_1_GBV = 500_000
 TIER_2_GBV = 100_000
 TIER_2_EMPLOYEES = 150
@@ -34,3 +36,7 @@ def possible_eligible_tiers(
         gbv_tiers.remove(3)
         gbv_tiers.add(2)
     return gbv_tiers
+
+
+def is_actionable_tier_change(current_tier: int, recommended_tier: int | None) -> bool:
+    return recommended_tier in TIERS and recommended_tier != current_tier

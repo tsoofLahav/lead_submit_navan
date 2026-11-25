@@ -3,9 +3,9 @@ from decimal import Decimal as D
 
 import pytest
 
-from app.reevaluation_gate import GateStatus, NO_TRIGGER_RESPONSE, ReevaluationGate
-from app.tier_eligibility import initial_tier
-from app.validation import CustomerActivityInput, LeadInput, ValidationError, validate_activity, validate_lead
+from app.business.customer_reevaluation.gate import GateStatus, NO_TRIGGER_RESPONSE, ReevaluationGate
+from app.business.rules.tier_eligibility import initial_tier
+from app.business.rules.validation import CustomerActivityInput, LeadInput, ValidationError, validate_activity, validate_lead
 
 
 @pytest.mark.parametrize(

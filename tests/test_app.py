@@ -4,8 +4,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import configure_mappers
 
 from app import create_app
-from app.models import Base
-from app.reference_data import BusinessPolicyNotFound, PromptNotFound, get_business_policy, get_prompt
+from app.data.models import Base
+from app.data.reference_data import BusinessPolicyNotFound, PromptNotFound, get_business_policy, get_prompt
 
 
 @pytest.fixture

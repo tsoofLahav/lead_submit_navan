@@ -1,23 +1,27 @@
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from enum import StrEnum
+from functools import partial
 
+from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 from sqlalchemy.orm import Session
 
-from .. import revised_policy
-from ..reevaluation_gate import ActivityMetrics, ReevaluationGate, TriggerResult
-from ..reference_data import get_business_policy, get_prompt
-from ..validation import (
+from ..business.rules import revised_policy, validation
+from ..business.customer_reevaluation.gate import ActivityMetrics, ReevaluationGate, TriggerResult
+from ..data.reference_data import get_business_policy, get_prompt
+from ..business.rules.validation import (
     AIOutputValidationError, CustomerActivityInput, LeadInput, TIERS, ValidationError,
     lead_recommendation_evidence, product_recommendation_evidence, validate_activity, validate_lead, validate_product_assessment, validate_research,
 )
+from ..business.rules.tier_eligibility import MIN_GBV_MONTHS
 from .diagnostics import digest
+from .request import AIRequest
 from .config import AISettings, Component
 from .schemas import (
-    LeadAssessmentOutput, LeadPredictionOutput, LeadRecommendationOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput,
+    ComputedRecommendation, LeadAssessmentOutput, LeadPredictionOutput, LeadRecommendationOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput,
     ScopedResearchOutput,
 )
 from .tools import ToolRegistry, strict_schema
@@ -82,19 +86,97 @@ TASKS = {
 }
 
 
-@dataclass(frozen=True)
-class RenderedPrompt:
+@dataclass(frozen=True, kw_only=True)
+class RenderedPrompt(AIRequest):
     task: Task
-    instructions: str
-    input_json: str
-    settings: AISettings
     context: dict
-    tool_options: dict
-    diagnostics: dict = field(default_factory=dict)
 
-    @property
-    def output_schema(self):
-        return TASKS[self.task].schema
+
+def _validate_evaluation_output(task: Task, data: dict, output: BaseModel) -> BaseModel:
+    if task == Task.LEAD_RESEARCH:
+        return revised_policy.normalize_research(output)
+    elif task == Task.LEAD_PREDICTION:
+        return revised_policy.compute_predictions(output, data["validated_research_findings"])
+    elif task == Task.LEAD_RECOMMENDATION:
+        validation.validate_recommendation(
+            output, current_tier=data["current_tier"], assessment=data["validated_predictions"],
+            lead=data["company_profile"], research=data["validated_research_findings"],
+        )
+    elif task == Task.REEVALUATION_PREDICTION:
+        activity = data["validated_product_data"]
+        validation.validate_product_assessment(output, activity, data["derived_metrics"], data["trigger_results"])
+        if output.confidence == "medium" and (
+            activity.months_since_signup < MIN_GBV_MONTHS or output.material_eligibility_uncertainty
+        ):
+            return output.model_copy(update={"confidence": "low"})
+    elif task == Task.REEVALUATION_RECOMMENDATION:
+        validation.validate_recommendation(
+            output, current_tier=data["current_tier"], assessment=data["validated_product_assessment"],
+            activity=data["validated_product_data"], metrics=data["derived_metrics"], triggers=data["trigger_results"],
+        )
+    if task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
+        fields = output.model_dump()
+        if output.outcome == "undetermined":
+            fields["confidence"] = "insufficient"
+        elif output.confidence == "insufficient":
+            fields["confidence"] = "low"
+        if task == Task.REEVALUATION_RECOMMENDATION and fields["confidence"] in {"high", "medium"}:
+            activity = data["validated_product_data"]
+            assessment = data["validated_product_assessment"]
+            fields["confidence"] = "low" if (
+                activity.months_since_signup < MIN_GBV_MONTHS or assessment.material_eligibility_uncertainty
+            ) else "medium"
+        if fields.get("material_suitability_uncertainty") and fields["confidence"] in {"high", "medium"}:
+            fields["confidence"] = "low"
+        return ComputedRecommendation(**fields, tier_alignment=data.get("tier_alignment"))
+    return output
+
+
+def _check_research_correction(original: ResearchOutput, corrected: ResearchOutput) -> None:
+    sources = {(item.signal, source.url) for item in original.signals for evidence in item.evidence
+               for source in evidence.sources}
+    for index, item in enumerate(corrected.signals):
+        for evidence_index, evidence in enumerate(item.evidence):
+            for source_index, source in enumerate(evidence.sources):
+                if (item.signal, source.url) not in sources:
+                    validation.require(
+                        False, "Correction cannot add a new source for a signal.",
+                        "correction.new_source", "2.1, 3.1",
+                        f"signals[{index}].evidence[{evidence_index}].sources[{source_index}].url",
+                        "source absent from original research for this signal",
+                    )
+
+
+def _check_scoped_research_correction(original: ScopedResearchOutput, corrected: ScopedResearchOutput) -> None:
+    observations = {finding.signal: finding.evidence for finding in original.signals}
+
+    def preserves_claim(before, after):
+        return (
+            type(before.value) is type(after.value) and before.value == after.value
+            and before.estimated_range == after.estimated_range
+            and (after.employee_bounds is None or before.employee_bounds == after.employee_bounds)
+            and all(any(
+                source.url == previous.url
+                and (source.publication_date is None or source.publication_date == previous.publication_date)
+                for previous in before.sources
+            ) for source in after.sources)
+        )
+
+    for signal_index, finding in enumerate(corrected.signals):
+        for evidence_index, item in enumerate(finding.evidence):
+            validation.require(
+                any(preserves_claim(before, item) for before in observations.get(finding.signal, ())),
+                "Correction must preserve the original claim, scope and source dates.",
+                "correction.changed_provenance", "2.1–2.2, 3.1, 6",
+                f"signals[{signal_index}].evidence[{evidence_index}]",
+                "claim, scope or source metadata absent from original observation",
+            )
+
+
+def _validate_research_correction(original: BaseModel, corrected: BaseModel) -> None:
+    _check_research_correction(original, corrected)
+    if isinstance(original, ScopedResearchOutput):
+        _check_scoped_research_correction(original, corrected)
 
 
 def _render(template: str, slots: dict[str, str]) -> str:
@@ -127,8 +209,10 @@ class PromptRenderer:
         """Call once at the start of an evaluation and pass the snapshot explicitly."""
         return get_business_policy(self.session)
 
-    def render(self, task: Task, *, policy: str, inputs: dict, settings: AISettings) -> RenderedPrompt:
+    def render(self, task: Task, *, policy: str, inputs: dict, settings: AISettings | None = None) -> RenderedPrompt:
         spec = TASKS[task]
+        if settings is None:
+            settings = AISettings.from_env(spec.component)
         if task != Task.CHAT and (not isinstance(policy, str) or not policy.strip()):
             raise PromptRenderError("An explicit business policy snapshot is required.")
         if task == Task.CHAT and "history" not in inputs:
@@ -291,7 +375,13 @@ class PromptRenderer:
             "research_evidence": evidence_bytes,
             "other_task_input": len(input_json.encode()) - evidence_bytes,
         }
-        return RenderedPrompt(task, instruction_text, input_json, settings, context, options, {
-            "policy_sha256": digest(policy) if task != Task.CHAT else None,
-            "prompt_sha256": template_checksums, "context_utf8_bytes": sizes,
-        })
+        return RenderedPrompt(
+            task=task, context=context, component=spec.component, instructions=instruction_text,
+            input_json=input_json, settings=settings, output_schema=spec.schema, tool_options=options,
+            diagnostics={
+                "policy_sha256": digest(policy) if task != Task.CHAT else None,
+                "prompt_sha256": template_checksums, "context_utf8_bytes": sizes,
+            },
+            validate_output=partial(_validate_evaluation_output, task, context) if task != Task.CHAT else None,
+            validate_correction=_validate_research_correction if task == Task.LEAD_RESEARCH else None,
+        )

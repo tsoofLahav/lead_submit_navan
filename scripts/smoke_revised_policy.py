@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
 
 from app.ai.client import AIClient
-from app.models import Base, BusinessPolicy, Prompt, Workspace
-from app.orchestrator import LeadEvaluationResult, Orchestrator
+from app.data.models import Base, BusinessPolicy, Prompt, Workspace
+from app.business.lead_submission.workflow import LeadEvaluationResult, LeadSubmission
 from scripts.smoke_database import open_local_database
 from scripts.smoke_lead import PROFILES, encode_report_value, verify_persistence
 from scripts.smoke_reevaluation import run_scenario
@@ -50,7 +50,7 @@ def main():
             return
         if not os.getenv("OPENAI_API_KEY"):
             raise SystemExit("Set OPENAI_API_KEY for live smoke tests.")
-        orchestrator = Orchestrator(sessions, ai_client=AIClient())
+        orchestrator = LeadSubmission(sessions, ai_client=AIClient())
         if scenario == "customer":
             report = run_scenario(sessions, orchestrator, "upgrade")
         else:

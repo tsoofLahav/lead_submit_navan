@@ -1,11 +1,10 @@
 from .budget import EvaluationBudget
 from .client import AIClient, AIResult
-from .config import AISettings, Component
 from .progress import ProgressCallback
 from .prompts import PromptRenderer, Task
 from .schemas import LeadPredictionOutput, ProductAssessmentOutput, ResearchOutput
-from ..reevaluation_gate import TriggerResult
-from ..validation import CustomerActivityInput, LeadInput
+from ..business.customer_reevaluation.gate import TriggerResult
+from ..business.rules.validation import CustomerActivityInput, LeadInput
 
 
 class ResearchEngine:
@@ -19,7 +18,6 @@ class ResearchEngine:
     ) -> AIResult:
         prompt = renderer.render(
             Task.LEAD_RESEARCH, policy=policy, inputs={"company_profile": lead},
-            settings=AISettings.from_env(Component.RESEARCH),
         )
         return self.client.execute(prompt, on_progress=on_progress, correct_validation=True, budget=self.budget)
 
@@ -36,7 +34,6 @@ class PredictionEngine:
         prompt = renderer.render(
             Task.LEAD_PREDICTION, policy=policy,
             inputs={"company_profile": lead, "validated_research_findings": research},
-            settings=AISettings.from_env(Component.PREDICTION),
         )
         return self.client.execute(prompt, on_progress=on_progress, correct_validation=True, budget=self.budget)
 
@@ -50,7 +47,6 @@ class PredictionEngine:
             inputs={
                 "validated_product_data": activity, "derived_metrics": gate.metrics, "trigger_results": gate,
             },
-            settings=AISettings.from_env(Component.PREDICTION),
         )
         return self.client.execute(prompt, on_progress=on_progress, correct_validation=True, budget=self.budget)
 
@@ -71,7 +67,6 @@ class DecisionEngine:
                 "company_profile": lead, "current_tier": current_tier,
                 "validated_research_findings": research, "validated_predictions": predictions,
             },
-            settings=AISettings.from_env(Component.DECISION),
         )
         return self.client.execute(prompt, on_progress=on_progress, correct_validation=True, budget=self.budget)
 
@@ -87,6 +82,5 @@ class DecisionEngine:
                 "current_tier": activity.current_tier, "validated_product_assessment": assessment,
                 "validated_product_data": activity, "derived_metrics": gate.metrics, "trigger_results": gate,
             },
-            settings=AISettings.from_env(Component.DECISION),
         )
         return self.client.execute(prompt, on_progress=on_progress, correct_validation=True, budget=self.budget)

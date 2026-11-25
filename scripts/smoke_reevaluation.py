@@ -12,11 +12,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app import create_app
 from app.ai.client import AIClient
-from app.human_approval import HumanApproval
-from app.models import Base, Company, CompanyResearch, Evaluation, ProductActivity, TierChange, Workspace
-from app.orchestrator import CustomerWorkflowFailure, Orchestrator
-from app.reevaluation_gate import GateStatus
-from app.validation import CustomerActivityInput
+from app.business.human_approval.service import HumanApproval
+from app.data.models import Base, Company, CompanyResearch, Evaluation, ProductActivity, TierChange, Workspace
+from app.business.customer_reevaluation.workflow import CustomerWorkflowFailure, CustomerReevaluation
+from app.business.customer_reevaluation.gate import GateStatus
+from app.business.rules.validation import CustomerActivityInput
 from scripts.smoke_database import open_local_database
 
 D = Decimal
@@ -123,7 +123,7 @@ def main():
     try:
         Base.metadata.create_all(local_engine)
         sessions = sessionmaker(local_engine)
-        orchestrator = Orchestrator(sessions, ai_client=AIClient(), reference_sessions=app.extensions["db_sessions"])
+        orchestrator = CustomerReevaluation(sessions, ai_client=AIClient(), reference_sessions=app.extensions["db_sessions"])
         for scenario in scenarios:
             try:
                 report = run_scenario(sessions, orchestrator, scenario)

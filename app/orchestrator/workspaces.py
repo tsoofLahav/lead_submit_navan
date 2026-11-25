@@ -5,7 +5,8 @@ from flask import current_app, session as browser_session
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
-from .models import Company, DemoCompany, Workspace
+from ..data.company_lock import CompanyBusy, acquire_company_lock
+from ..data.models import Company, DemoCompany, Workspace
 
 COOKIE_WORKSPACE_KEY = "workspace_id"
 
@@ -16,11 +17,19 @@ def seed_demo_companies(db_session, workspace_id: UUID) -> None:
         Company.workspace_id == workspace_id,
         or_(Company.domain == DemoCompany.domain, func.lower(Company.name) == func.lower(DemoCompany.name)),
     ).exists()
+    available = []
+    for name in db_session.scalars(select(DemoCompany.name).where(~existing)):
+        try:
+            acquire_company_lock(db_session, workspace_id, name)
+        except CompanyBusy:
+            # A later list request can fill this template if the operation did not create it.
+            continue
+        available.append(name)
     templates = select(
         literal(workspace_id), DemoCompany.name, DemoCompany.domain,
         DemoCompany.submitted_annual_gbv, DemoCompany.employee_count, DemoCompany.current_tier,
         literal(True),
-    ).where(~existing)
+    ).where(~existing, DemoCompany.name.in_(available))
     db_session.execute(
         insert(Company).from_select(
             ("workspace_id", "name", "domain", "submitted_annual_gbv", "employee_count",

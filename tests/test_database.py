@@ -5,8 +5,8 @@ from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 
 from app import create_app
-from app.models import Base
-from app.reference_data import PromptNotFound, get_business_policy, get_prompt, list_prompt_keys
+from app.data.models import Base
+from app.data.reference_data import PromptNotFound, get_business_policy, get_prompt, list_prompt_keys
 
 
 pytestmark = pytest.mark.integration
@@ -160,8 +160,8 @@ def test_stored_ai_prompts_render_through_shared_renderer(connection):
     from app.ai.prompts import TASKS, PromptRenderer, Task
     from app.ai.schemas import LeadPredictionOutput, ProductAssessmentOutput, ResearchOutput, ResearchSignal, Signal
     from app.ai.tools import ToolRegistry
-    from app.reevaluation_gate import ReevaluationGate
-    from app.validation import CustomerActivityInput, LeadInput
+    from app.business.customer_reevaluation.gate import ReevaluationGate
+    from app.business.rules.validation import CustomerActivityInput, LeadInput
 
     lead = LeadInput("Synthetic", "example.com", Decimal(100_000))
     activity = CustomerActivityInput("Synthetic", "example.com", 3, 4)

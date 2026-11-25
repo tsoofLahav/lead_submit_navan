@@ -1,0 +1,1 @@
+"""Lead submission business operation."""

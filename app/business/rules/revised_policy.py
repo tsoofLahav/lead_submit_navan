@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 
 from . import validation
-from .ai.schemas import (
+from ...ai.schemas import (
     ComputedLeadPredictionOutput, ComputedTravelPrediction, LeadAssessmentOutput, ScopedResearchOutput,
     ScopedSignalEvidence, Signal,
 )

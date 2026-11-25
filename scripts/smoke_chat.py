@@ -9,8 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import create_app
-from app.chat import ChatAssistant, ChatFailure
-from app.models import Base, Company, CompanyResearch, Evaluation, ProductActivity, TierChange, Workspace
+from app.orchestrator.actions import ChatFailure, Orchestrator
+from app.data.models import Base, Company, CompanyResearch, Evaluation, ProductActivity, TierChange, Workspace
 from scripts.smoke_database import open_local_database
 
 QUESTIONS = (
@@ -71,12 +71,12 @@ def main():
         Base.metadata.create_all(local)
         sessions = sessionmaker(local)
         workspace_id, company_id, evaluation_id = seed(sessions)
-        assistant = ChatAssistant(sessions, reference_sessions=app.extensions["db_sessions"])
-        conversation = assistant.create_conversation(workspace_id)
+        assistant = Orchestrator(sessions, reference_sessions=app.extensions["db_sessions"])
+        conversation = assistant.conversations.create_conversation(workspace_id)
         failed = False
         for name, question in QUESTIONS:
             try:
-                turn = assistant.send_message(workspace_id, conversation.id, question)
+                turn = assistant.reply_to_chat(workspace_id, conversation.id, question)
                 report = {"case": name, "answer": turn.assistant_message.content, "execution": asdict(turn.execution)}
             except ChatFailure as error:
                 failed = True
@@ -92,7 +92,7 @@ def main():
             assert len(changes) == 1 and changes[0].evaluation_id is None
         print(json.dumps({"case": "persistence", "current_tier": 2, "decision_status": "pending",
                           "recorded_tier_changes": len(changes),
-                          "messages": len(assistant.list_messages(workspace_id, conversation.id))}), flush=True)
+                          "messages": len(assistant.conversations.list_messages(workspace_id, conversation.id))}), flush=True)
         if failed:
             raise SystemExit(1)
     finally:

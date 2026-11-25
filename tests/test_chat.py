@@ -10,12 +10,13 @@ from app.ai.client import FailureKind
 from app.ai.config import Component
 from app.ai.progress import ProgressKind
 from app.ai.tools import ToolError
-from app.chat import ChatAssistant, ChatFailure, ConversationNotFound, ConversationPersistenceError, MessageKind
-from app.chat_tools import build_chat_tools
-from app.human_approval import RecommendationNotFound
-from app.models import BusinessPolicy, Company, Evaluation, ProductActivity, Prompt
-from app.orchestrator import LeadWorkflowFailure, Orchestrator
-from app.validation import CustomerActivityInput, LeadInput
+from app.conversations.service import ConversationNotFound, ConversationPersistenceError, MessageKind
+from app.orchestrator.actions import ChatFailure, Orchestrator
+from app.conversations.tools import build_chat_tools
+from app.business.human_approval.service import RecommendationNotFound
+from app.data.models import BusinessPolicy, Company, Evaluation, ProductActivity, Prompt
+from app.business.lead_submission.workflow import LeadWorkflowFailure
+from app.business.rules.validation import CustomerActivityInput, LeadInput
 from scripts.smoke_chat import seed
 from test_ai import POLICY, SYSTEM, message, mock_client, terminal
 from test_customer_reevaluation import UPGRADE, assessment, recommendation
@@ -54,27 +55,27 @@ def call(name, args, index=1):
 
 def assistant_with_responses(sessions, *batches, **kwargs):
     client, requests = mock_client(*batches)
-    return ChatAssistant(sessions, sdk=client._sdk, **kwargs), requests
+    return Orchestrator(sessions, sdk=client._sdk, **kwargs), requests
 
 
 def test_conversation_management_history_context_and_retry(sessions, workspace_ids, references):
     owner, outsider = workspace_ids
     chat, requests = assistant_with_responses(sessions, final("First answer"), 500, final("Recovered"), history_limit=3)
-    other = chat.create_conversation(outsider)
-    first = chat.send_message(owner, None, "   First    meaningful question   ")
+    other = chat.conversations.create_conversation(outsider)
+    first = chat.reply_to_chat(owner, None, "   First    meaningful question   ")
     thread = first.user_message.conversation_id
-    assert chat.get_conversation(owner, thread).title == "First meaningful question"
-    assert [row.id for row in chat.list_conversations(owner)] == [thread]
-    assert chat.get_conversation(outsider, other.id).id == other.id
+    assert chat.conversations.get_conversation(owner, thread).title == "First meaningful question"
+    assert [row.id for row in chat.conversations.list_conversations(owner)] == [thread]
+    assert chat.conversations.get_conversation(outsider, other.id).id == other.id
     with pytest.raises(ConversationNotFound):
-        chat.list_messages(outsider, thread)
+        chat.conversations.list_messages(outsider, thread)
     with pytest.raises(ConversationNotFound):
-        chat.rename_conversation(outsider, thread, "Hidden")
-    assert chat.rename_conversation(owner, thread, "Explicit title").title == "Explicit title"
+        chat.conversations.rename_conversation(outsider, thread, "Hidden")
+    assert chat.conversations.rename_conversation(owner, thread, "Explicit title").title == "Explicit title"
     with pytest.raises(ChatFailure) as error:
-        chat.send_message(owner, thread, "Second question")
+        chat.reply_to_chat(owner, thread, "Second question")
     user = error.value.user_message
-    assert len(chat.list_messages(owner, thread)) == 3
+    assert len(chat.conversations.list_messages(owner, thread)) == 3
     with pytest.raises(ConversationNotFound):
         chat.retry_message(owner, other.id, user.id)
     confirmed = chat.retry_message(owner, thread, user.id)
@@ -83,7 +84,7 @@ def test_conversation_management_history_context_and_retry(sessions, workspace_i
     assert len(requests) == 3
     history = json.loads(requests[-1]["input"][1]["content"])["history"]
     assert [item["role"] for item in history] == ["user", "assistant"]
-    assert [row.content for row in chat.list_messages(owner, thread, 2, before_id=user.id)] == [
+    assert [row.content for row in chat.conversations.list_messages(owner, thread, 2, before_id=user.id)] == [
         "First    meaningful question", "First answer",
     ]
     assert POLICY not in requests[-1]["input"][0]["content"]
@@ -144,7 +145,7 @@ def test_cumulative_budget_counts_invalid_and_parallel_requests(sessions, worksp
     ]
     chat, requests = assistant_with_responses(sessions, [terminal(batch)], final("Policy answer."))
     events = []
-    turn = chat.send_message(owner, None, "Explain Tier 1.", on_progress=events.append)
+    turn = chat.reply_to_chat(owner, None, "Explain Tier 1.", on_progress=events.append)
     assert turn.execution.application_tool_attempts == 2 and turn.execution.application_tools == ("get_business_policy",)
     assert turn.execution.request_rounds == 2
     assert requests[1]["tool_choice"] == "none" and "max_tool_calls" not in requests[1]
@@ -165,11 +166,11 @@ def test_round_limit_or_unauthorized_call_fails_safely(sessions, workspace_ids, 
         sessions, [terminal([call(tool, {})])], [terminal([call(tool, {}, 2)])],
     )
     with pytest.raises(ChatFailure) as caught:
-        chat.send_message(owner, None, "Change the current tier.")
+        chat.reply_to_chat(owner, None, "Change the current tier.")
     failure = caught.value
     assert failure.reason == FailureKind.TOOL_ERROR
     assert len(requests) == (2 if tool == "get_business_policy" else 1)
-    assert len(chat.list_messages(owner, failure.user_message.conversation_id)) == 1
+    assert len(chat.conversations.list_messages(owner, failure.user_message.conversation_id)) == 1
 
 
 def test_lead_result_and_progress_stay_with_initiating_conversation(sessions, workspace_ids, references):
@@ -178,24 +179,24 @@ def test_lead_result_and_progress_stay_with_initiating_conversation(sessions, wo
         lead_response(research_data(), research=True), lead_response(prediction_data()), lead_response(decision_data()),
     )
     chat, requests = assistant_with_responses(sessions, final("The recommendation was undetermined."),
-                                             orchestrator=Orchestrator(sessions, ai_client=business))
-    original = chat.create_conversation(owner)
+                                             evaluation_client=business)
+    original = chat.conversations.create_conversation(owner)
     events = []
     switched = []
 
     def progress(event):
         events.append(event)
         if event.kind == ProgressKind.RESEARCH_STARTED:
-            switched.append(chat.create_conversation(owner))
+            switched.append(chat.conversations.create_conversation(owner))
 
     result = chat.submit_lead(owner, original.id, LeadInput("Acme", "example.com", Decimal("100000")), on_progress=progress)
     assert result.metadata["kind"] == MessageKind.EVALUATION
     assert result.metadata["result"]["research"]["signals"]
     assert result.metadata["decision_status"] == "not_applicable"
     assert all(event.conversation_id == original.id for event in events)
-    assert len(chat.list_messages(owner, original.id)) == 2 and not chat.list_messages(owner, switched[0].id)
+    assert len(chat.conversations.list_messages(owner, original.id)) == 2 and not chat.conversations.list_messages(owner, switched[0].id)
     assert len(business_requests) == 3
-    chat.send_message(owner, original.id, "What happened?")
+    chat.reply_to_chat(owner, original.id, "What happened?")
     history = json.loads(requests[0]["input"][1]["content"])["history"]
     assert history[-1]["metadata"]["evaluation_id"] == result.metadata["evaluation_id"]
     assert history[-1]["metadata"]["decision_status"] == "not_applicable"
@@ -208,18 +209,18 @@ def test_approval_confirmation_reads_current_status_and_stays_in_thread(sessions
     # Use actual customer workflow responses, with structured text in each mocked Response.
     client, _ = mock_client([terminal([message(json.dumps(assessment()))])],
                             [terminal([message(json.dumps(recommendation()))])])
-    chat = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=client))
+    chat = Orchestrator(sessions, evaluation_client=client)
     result = chat.submit_customer_reevaluation(owner, None, UPGRADE)
     evaluation_id = UUID(result.metadata["evaluation_id"])
     assert result.metadata["decision_status"] == "pending" and result.metadata["approval_available"]
-    other = chat.create_conversation(owner)
+    other = chat.conversations.create_conversation(owner)
     with pytest.raises(RecommendationNotFound):
         chat.decide_recommendation(owner, other.id, evaluation_id, accept=accept)
     with pytest.raises(RecommendationNotFound):
         chat.decide_recommendation(outsider, result.conversation_id, evaluation_id, accept=accept)
     confirmation = chat.decide_recommendation(owner, result.conversation_id, evaluation_id, accept=accept)
     assert chat.record_decision_confirmation(owner, result.conversation_id, evaluation_id).id == confirmation.id
-    rows = chat.list_messages(owner, result.conversation_id)
+    rows = chat.conversations.list_messages(owner, result.conversation_id)
     assert len(rows) == 3 and rows[-1].metadata["kind"] == MessageKind.DECISION
     assert rows[-2].metadata["decision_status"] == ("accepted" if accept else "rejected")
     assert not rows[-2].metadata["approval_available"]
@@ -229,24 +230,24 @@ def test_message_write_failure_replays_only_prepared_result(sessions, workspace_
     owner, _ = workspace_ids
     from test_customer_reevaluation import uncertain_responses
     ai, _ = mock_client(*uncertain_responses())
-    chat = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=ai))
+    chat = Orchestrator(sessions, evaluation_client=ai)
     activity = CustomerActivityInput("Acme", "acme.test", 3, 1)
-    store = chat.save_prepared_message
+    store = chat.conversations.save_prepared_message
 
     def unavailable(*_):
         raise SQLAlchemyError("private connection data")
 
-    monkeypatch.setattr(chat, "save_prepared_message", unavailable)
+    monkeypatch.setattr(chat.conversations, "save_prepared_message", unavailable)
     with pytest.raises(ConversationPersistenceError) as caught:
         chat.submit_customer_reevaluation(owner, None, activity)
     failure = caught.value
     assert failure.business_result.activity_id is not None and "private" not in str(failure)
-    monkeypatch.setattr(chat, "save_prepared_message", store)
-    recovery = chat.save_prepared_message(owner, failure.draft)
-    assert chat.save_prepared_message(owner, failure.draft).id == recovery.id
+    monkeypatch.setattr(chat.conversations, "save_prepared_message", store)
+    recovery = chat.conversations.save_prepared_message(owner, failure.draft)
+    assert chat.conversations.save_prepared_message(owner, failure.draft).id == recovery.id
     assert recovery.metadata["kind"] == MessageKind.EVALUATION
     assert "undetermined" in recovery.content.lower()
-    assert len(chat.list_messages(owner, recovery.conversation_id)) == 2
+    assert len(chat.conversations.list_messages(owner, recovery.conversation_id)) == 2
     with sessions() as session:
         assert session.scalar(select(func.count(ProductActivity.id))) == 1
         assert session.scalar(select(func.count(Evaluation.id))) == 1
@@ -259,20 +260,20 @@ def test_chat_stream_event_is_bound_to_conversation(sessions, workspace_ids, ref
              "output_index": 0, "content_index": 0, "sequence_number": 1}
     chat, _ = assistant_with_responses(sessions, [delta, *final("Completed answer")])
     events = []
-    turn = chat.send_message(owner, None, "Question", on_progress=events.append)
+    turn = chat.reply_to_chat(owner, None, "Question", on_progress=events.append)
     event, = events
     assert event.kind == ProgressKind.CHAT_RESPONSE_STREAMING and event.response_delta == "{"
     assert event.conversation_id == turn.user_message.conversation_id
-    assert chat.list_messages(owner, event.conversation_id)[-1].content == "Completed answer"
+    assert chat.conversations.list_messages(owner, event.conversation_id)[-1].content == "Completed answer"
 
 
 def test_business_failure_is_persisted_as_distinct_message(sessions, workspace_ids):
     owner, _ = workspace_ids
-    chat = ChatAssistant(sessions)
-    conversation = chat.create_conversation(owner)
+    chat = Orchestrator(sessions)
+    conversation = chat.conversations.create_conversation(owner)
     with pytest.raises(LeadWorkflowFailure):
         chat.submit_lead(owner, conversation.id, LeadInput("Northstar", "example.test", Decimal("-1")))
-    request, failure = chat.list_messages(owner, conversation.id)
+    request, failure = chat.conversations.list_messages(owner, conversation.id)
     assert failure.metadata["kind"] == MessageKind.WORKFLOW_FAILURE
     assert failure.metadata["reply_to"] == request.id
     assert failure.metadata["result"]["stage"] == "registration"
@@ -283,11 +284,11 @@ def test_workflow_without_selected_conversation_reuses_workspace_thread(sessions
     owner, outsider = workspace_ids
     from test_customer_reevaluation import uncertain_responses
     ai, _ = mock_client(*uncertain_responses())
-    chat = ChatAssistant(sessions, orchestrator=Orchestrator(sessions, ai_client=ai))
-    original = chat.create_conversation(owner)
-    foreign = chat.create_conversation(outsider)
+    chat = Orchestrator(sessions, evaluation_client=ai)
+    original = chat.conversations.create_conversation(owner)
+    foreign = chat.conversations.create_conversation(outsider)
     result = chat.submit_customer_reevaluation(
         owner, None, CustomerActivityInput("Acme", "acme.test", 3, 1),
     )
     assert result.conversation_id == original.id
-    assert len(chat.list_conversations(owner)) == 1 and not chat.list_messages(outsider, foreign.id)
+    assert len(chat.conversations.list_conversations(owner)) == 1 and not chat.conversations.list_messages(outsider, foreign.id)

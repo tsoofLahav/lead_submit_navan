@@ -6,7 +6,8 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Literal
 
-from .ai.schemas import (
+from ...ai.request import AIOutputValidationError, ValidationDiagnostic
+from ...ai.schemas import (
     ActivityEvidence, LeadPredictionOutput, ProductAssessmentOutput, RecommendationOutput, ResearchOutput, Signal,
 )
 
@@ -122,27 +123,6 @@ def validate_activity(activity: CustomerActivityInput) -> CustomerActivityInput:
         company_name=display_name(activity.company_name),
         company_domain=validate_domain(activity.company_domain),
     )
-
-
-@dataclass(frozen=True)
-class ValidationDiagnostic:
-    rule_id: str
-    policy_section: str
-    field_path: str
-    observed: object
-    message: str
-
-
-class AIOutputValidationError(ValueError):
-    """An AI response violates a deterministic business constraint."""
-
-    def __init__(
-        self, message: str, diagnostic: ValidationDiagnostic,
-        additional_diagnostics: tuple[ValidationDiagnostic, ...] = (),
-    ):
-        super().__init__(message)
-        self.diagnostic = diagnostic
-        self.additional_diagnostics = additional_diagnostics
 
 
 TRAVEL_WEIGHTS = {Signal.EXTERNAL_ACTIVITY: 2, Signal.GEOGRAPHY: 2, Signal.EVENTS: 1}

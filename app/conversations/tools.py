@@ -8,13 +8,13 @@ from pydantic import Field, model_validator
 from pydantic_core import to_jsonable_python
 from sqlalchemy.orm import Session, sessionmaker
 
-from .ai.schemas import StructuredOutput, Tier
-from .ai.tools import ReadOnlyFunction, ToolRegistry
-from .data_access import WorkspaceData
-from .models import Company, CompanyResearch, Evaluation, ProductActivity, TierChange
-from .reevaluation_gate import ReevaluationGate
-from .reference_data import BusinessPolicyNotFound, get_business_policy
-from .validation import CustomerActivityInput
+from ..ai.schemas import StructuredOutput, Tier
+from ..ai.tools import ReadOnlyFunction, ToolRegistry
+from ..data.access import WorkspaceData
+from ..data.models import Company, CompanyResearch, Evaluation, ProductActivity, TierChange
+from ..business.customer_reevaluation.gate import ReevaluationGate
+from ..data.reference_data import BusinessPolicyNotFound, get_business_policy
+from ..business.rules.validation import CustomerActivityInput
 
 MAX_COMPANIES = 20
 MAX_HISTORY = 10

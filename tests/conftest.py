@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine, make_url, text
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Workspace
+from app.data.models import Base, Workspace
 
 
 @pytest.fixture(scope="module")

@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
-from .tier_eligibility import MIN_GBV_MONTHS, possible_eligible_tiers
-from .validation import CustomerActivityInput, TREND_FIELDS, validate_activity
+from ..rules.tier_eligibility import MIN_GBV_MONTHS, possible_eligible_tiers
+from ..rules.validation import CustomerActivityInput, TREND_FIELDS, validate_activity
 
 SUPPORT_TRIGGER_RATE = 5
 

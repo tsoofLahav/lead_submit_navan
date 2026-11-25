@@ -1,12 +1,12 @@
 from typing import TypeVar
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import Company, CompanyResearch, Conversation, Evaluation, Message, ProductActivity, TierChange
-from .validation import company_name_key, domain_key
+from ..business.rules.validation import company_name_key, domain_key
 
 CompanyRecord = TypeVar("CompanyRecord", CompanyResearch, ProductActivity, Evaluation, TierChange)
 
@@ -119,6 +119,21 @@ class WorkspaceData:
             query = query.where(model.id == record_id)
         return list(self.session.scalars(query))
 
+    def supersede_pending_evaluations(self, company_id: UUID) -> int:
+        """Invalidate pending evaluations inside the caller's transaction."""
+        result = self.session.execute(
+            update(Evaluation)
+            .where(
+                Evaluation.company_id == company_id,
+                Evaluation.decision_status == "pending",
+                Evaluation.company_id.in_(
+                    select(Company.id).where(Company.workspace_id == self.workspace_id)
+                ),
+            )
+            .values(decision_status="superseded", decided_at=func.now())
+        )
+        return result.rowcount
+
     def evaluations_by_id(self, ids: set[UUID]) -> dict[UUID, Evaluation]:
         if not ids:
             return {}
@@ -127,18 +142,13 @@ class WorkspaceData:
             .where(Company.workspace_id == self.workspace_id, Evaluation.id.in_(ids))
         )}
 
-    def lead_history(self, company: Company) -> tuple[int, int, int]:
-        """Return original tier and counts of append-only activity and tier records."""
-        scope = (Company.id == company.id, Company.workspace_id == self.workspace_id)
-        changes = select(TierChange).join(Company, Company.id == TierChange.company_id).where(*scope)
+    def original_tier(self, company: Company) -> int:
         first_tier = self.session.scalar(
-            changes.with_only_columns(TierChange.previous_tier).order_by(TierChange.created_at, TierChange.id).limit(1)
+            select(TierChange.previous_tier).join(Company, Company.id == TierChange.company_id)
+            .where(Company.id == company.id, Company.workspace_id == self.workspace_id)
+            .order_by(TierChange.created_at, TierChange.id).limit(1)
         )
-        activity_count = self.session.scalar(
-            select(func.count(ProductActivity.id)).join(Company, Company.id == ProductActivity.company_id).where(*scope)
-        )
-        change_count = self.session.scalar(select(func.count()).select_from(changes.subquery()))
-        return first_tier if first_tier is not None else company.current_tier, activity_count, change_count
+        return first_tier if first_tier is not None else company.current_tier
 
     def customer_snapshot_state(self, snapshot: ProductActivity) -> tuple[bool, bool, bool]:
         """Check for superseding activity, later tier history, and a completed evaluation."""

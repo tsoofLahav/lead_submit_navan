@@ -12,7 +12,7 @@ from app.ai.client import AIClient, AIExecutionError
 from app.ai.config import AISettings, Component
 from app.ai.prompts import PromptRenderer, Task
 from app.ai.tools import ToolRegistry
-from app.validation import LeadInput
+from app.business.rules.validation import LeadInput
 
 
 def main() -> None:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -5,22 +7,21 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from time import monotonic
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import httpx
-import openai
-from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from .. import revised_policy, validation
-from ..tier_eligibility import MIN_GBV_MONTHS
 from .budget import HOSTED_INPUT_RESERVE, EvaluationBudget, estimate_cost_usd
 from .config import Component
 from .diagnostics import current_evaluation, digest, query_fingerprint
 from .progress import ProgressCallback, ProgressEvent, ProgressKind, SearchProgress
-from .prompts import TASKS, RenderedPrompt, Task
-from .schemas import ComputedRecommendation, ResearchOutput, ScopedResearchOutput
+from .request import AIOutputValidationError, AIRequest, ValidationDiagnostic
 from .tools import InvalidToolArguments, ToolError, ToolRegistry, strict_schema
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +88,11 @@ class PhaseTimings:
 
 @dataclass(frozen=True)
 class CorrectionMetadata:
-    initial_diagnostic: validation.ValidationDiagnostic
+    initial_diagnostic: ValidationDiagnostic
     duration_seconds: float
     succeeded: bool
     failure: FailureKind | None
-    additional_diagnostics: tuple[validation.ValidationDiagnostic, ...] = ()
+    additional_diagnostics: tuple[ValidationDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,7 @@ class ExecutionMetadata:
     usage: TokenUsage | None
     validation_passed: bool | None
     failure: FailureKind | None
-    validation_diagnostic: validation.ValidationDiagnostic | None
+    validation_diagnostic: ValidationDiagnostic | None
     phases: PhaseTimings
     application_tools: tuple[str, ...] = ()
     application_tool_attempts: int = 0
@@ -214,9 +215,11 @@ def _record_search(details: dict, item) -> None:
 
 
 def _failure_kind(error: Exception) -> FailureKind:
+    import openai
+
     if isinstance(error, _ExecutionFailure):
         return error.kind
-    if isinstance(error, validation.AIOutputValidationError):
+    if isinstance(error, AIOutputValidationError):
         return FailureKind.VALIDATION
     if isinstance(error, ToolError):
         return FailureKind.TOOL_ERROR
@@ -235,47 +238,6 @@ def _failure_kind(error: Exception) -> FailureKind:
     return FailureKind.API_ERROR
 
 
-def _validate(prompt: RenderedPrompt, output: BaseModel) -> BaseModel:
-    data = prompt.context
-    if prompt.task == Task.LEAD_RESEARCH:
-        return revised_policy.normalize_research(output)
-    elif prompt.task == Task.LEAD_PREDICTION:
-        return revised_policy.compute_predictions(output, data["validated_research_findings"])
-    elif prompt.task == Task.LEAD_RECOMMENDATION:
-        validation.validate_recommendation(
-            output, current_tier=data["current_tier"], assessment=data["validated_predictions"],
-            lead=data["company_profile"], research=data["validated_research_findings"],
-        )
-    elif prompt.task == Task.REEVALUATION_PREDICTION:
-        activity = data["validated_product_data"]
-        validation.validate_product_assessment(output, activity, data["derived_metrics"], data["trigger_results"])
-        if output.confidence == "medium" and (
-            activity.months_since_signup < MIN_GBV_MONTHS or output.material_eligibility_uncertainty
-        ):
-            return output.model_copy(update={"confidence": "low"})
-    elif prompt.task == Task.REEVALUATION_RECOMMENDATION:
-        validation.validate_recommendation(
-            output, current_tier=data["current_tier"], assessment=data["validated_product_assessment"],
-            activity=data["validated_product_data"], metrics=data["derived_metrics"], triggers=data["trigger_results"],
-        )
-    if prompt.task in (Task.LEAD_RECOMMENDATION, Task.REEVALUATION_RECOMMENDATION):
-        fields = output.model_dump()
-        if output.outcome == "undetermined":
-            fields["confidence"] = "insufficient"
-        elif output.confidence == "insufficient":
-            fields["confidence"] = "low"
-        if prompt.task == Task.REEVALUATION_RECOMMENDATION and fields["confidence"] in {"high", "medium"}:
-            activity = data["validated_product_data"]
-            assessment = data["validated_product_assessment"]
-            fields["confidence"] = "low" if (
-                activity.months_since_signup < MIN_GBV_MONTHS or assessment.material_eligibility_uncertainty
-            ) else "medium"
-        if fields.get("material_suitability_uncertainty") and fields["confidence"] in {"high", "medium"}:
-            fields["confidence"] = "low"
-        return ComputedRecommendation(**fields, tier_alignment=data.get("tier_alignment"))
-    return output
-
-
 _CORRECTION_INSTRUCTIONS = (
     "Correct the prior structured result using the original task context and the validation diagnostic below. "
     "Keep valid information and change only unsupported or inconsistent findings and dependent fields. "
@@ -285,59 +247,19 @@ _CORRECTION_INSTRUCTIONS = (
 )
 
 
-def _check_research_correction(original: ResearchOutput, corrected: ResearchOutput) -> None:
-    sources = {(item.signal, source.url) for item in original.signals for evidence in item.evidence
-               for source in evidence.sources}
-    for index, item in enumerate(corrected.signals):
-        for evidence_index, evidence in enumerate(item.evidence):
-            for source_index, source in enumerate(evidence.sources):
-                if (item.signal, source.url) not in sources:
-                    validation.require(
-                        False, "Correction cannot add a new source for a signal.",
-                        "correction.new_source", "2.1, 3.1",
-                        f"signals[{index}].evidence[{evidence_index}].sources[{source_index}].url",
-                        "source absent from original research for this signal",
-                    )
-
-
-def _check_scoped_research_correction(original: ScopedResearchOutput, corrected: ScopedResearchOutput) -> None:
-    observations = {finding.signal: finding.evidence for finding in original.signals}
-
-    def preserves_claim(before, after):
-        return (
-            type(before.value) is type(after.value) and before.value == after.value
-            and before.estimated_range == after.estimated_range
-            and (after.employee_bounds is None or before.employee_bounds == after.employee_bounds)
-            and all(any(
-                source.url == previous.url
-                and (source.publication_date is None or source.publication_date == previous.publication_date)
-                for previous in before.sources
-            ) for source in after.sources)
-        )
-
-    for signal_index, finding in enumerate(corrected.signals):
-        for evidence_index, item in enumerate(finding.evidence):
-            validation.require(
-                any(preserves_claim(before, item) for before in observations.get(finding.signal, ())),
-                "Correction must preserve the original claim, scope and source dates.",
-                "correction.changed_provenance", "2.1–2.2, 3.1, 6",
-                f"signals[{signal_index}].evidence[{evidence_index}]",
-                "claim, scope or source metadata absent from original observation",
-            )
-
-
 class AIClient:
     def __init__(self, tools: ToolRegistry | None = None, *, sdk: OpenAI | None = None):
         self.tools = tools if tools is not None else ToolRegistry()
         self._sdk = sdk
 
     def execute(
-        self, prompt: RenderedPrompt, *, chat_schema: type[BaseModel] | None = None,
+        self, prompt: AIRequest, *, chat_schema: type[BaseModel] | None = None,
         workspace_id: UUID | None = None, on_progress: ProgressCallback | None = None,
         correct_validation: bool = False, budget: EvaluationBudget | None = None,
     ) -> AIResult:
-        spec = TASKS[prompt.task]
-        component = spec.component
+        import openai
+
+        component = prompt.component
         settings = prompt.settings
         started_at = datetime.now(UTC)
         start = monotonic()
@@ -360,7 +282,7 @@ class AIClient:
         correction_enabled = correct_validation and component != Component.CHAT
         initial_diagnostic = None
         initial_additional_diagnostics = ()
-        original_research = None
+        original_output = None
         correction_started_at = initial_response_at = None
 
         try:
@@ -374,7 +296,7 @@ class AIClient:
                 raise _ExecutionFailure(FailureKind.TOOL_ERROR)
             if self._sdk is None:
                 try:
-                    self._sdk = OpenAI(max_retries=0)
+                    self._sdk = openai.OpenAI(max_retries=0)
                 except openai.OpenAIError:
                     raise _ExecutionFailure(FailureKind.CONFIGURATION) from None
             request_input = [
@@ -590,18 +512,17 @@ class AIClient:
                 output = schema.model_validate_json(parts[0], strict=True)
                 validation_started = monotonic()
                 try:
-                    output = _validate(prompt, output)
-                    if correcting and original_research is not None:
-                        _check_research_correction(original_research, output)
-                        if isinstance(original_research, ScopedResearchOutput):
-                            _check_scoped_research_correction(original_research, output)
-                except validation.AIOutputValidationError as error:
+                    if prompt.validate_output is not None:
+                        output = prompt.validate_output(output)
+                    if correcting and prompt.validate_correction is not None:
+                        prompt.validate_correction(original_output, output)
+                except AIOutputValidationError as error:
                     if not correction_enabled or correcting:
                         raise
                     initial_diagnostic = error.diagnostic
                     initial_additional_diagnostics = error.additional_diagnostics
-                    if isinstance(output, ResearchOutput):
-                        original_research = output
+                    if prompt.validate_correction is not None:
+                        original_output = output
                     request_input.extend((
                         {"role": "developer", "content": _CORRECTION_INSTRUCTIONS},
                         {"role": "user", "content": json.dumps({
@@ -628,13 +549,13 @@ class AIClient:
                 raise _ExecutionFailure(FailureKind.TOOL_ERROR)
         except (
             _ExecutionFailure, openai.OpenAIError, httpx.TransportError, ToolError, ValidationError,
-            validation.AIOutputValidationError,
+            AIOutputValidationError,
         ) as error:
             failure = _failure_kind(error)
             exception_type = type(error).__name__
             if isinstance(error, _ExecutionFailure) and error.api_error is not None:
                 api_error = error.api_error
-            if isinstance(error, validation.AIOutputValidationError):
+            if isinstance(error, AIOutputValidationError):
                 diagnostic = error.diagnostic
             if failure in {FailureKind.VALIDATION, FailureKind.MALFORMED_OUTPUT}:
                 passed = False
